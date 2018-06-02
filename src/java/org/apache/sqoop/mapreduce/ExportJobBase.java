@@ -18,10 +18,14 @@
 
 package org.apache.sqoop.mapreduce;
 
-import java.io.FileNotFoundException;
-import java.io.IOException;
-import java.sql.SQLException;
-
+import com.cloudera.sqoop.SqoopOptions;
+import com.cloudera.sqoop.config.ConfigurationHelper;
+import com.cloudera.sqoop.lib.SqoopRecord;
+import com.cloudera.sqoop.manager.ConnManager;
+import com.cloudera.sqoop.manager.ExportJobContext;
+import com.cloudera.sqoop.mapreduce.JobBase;
+import com.cloudera.sqoop.orm.TableClassName;
+import com.cloudera.sqoop.util.ExportException;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
@@ -39,15 +43,14 @@ import org.apache.hadoop.mapreduce.lib.input.FileInputFormat;
 import org.apache.sqoop.mapreduce.hcat.SqoopHCatUtilities;
 import org.apache.sqoop.util.LoggingUtils;
 import org.apache.sqoop.util.PerfCounters;
-import com.cloudera.sqoop.SqoopOptions;
-import com.cloudera.sqoop.config.ConfigurationHelper;
-import com.cloudera.sqoop.lib.SqoopRecord;
-import com.cloudera.sqoop.manager.ConnManager;
-import com.cloudera.sqoop.manager.ExportJobContext;
-import com.cloudera.sqoop.orm.TableClassName;
-import com.cloudera.sqoop.mapreduce.JobBase;
-import com.cloudera.sqoop.util.ExportException;
-import org.apache.sqoop.validation.*;
+import org.apache.sqoop.validation.ValidationContext;
+import org.apache.sqoop.validation.ValidationException;
+
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.sql.SQLException;
+import java.util.Date;
+import org.apache.sqoop.util.FileSystemUtil;
 
 /**
  * Base class for running an export MapReduce job.
@@ -79,6 +82,19 @@ public class ExportJobBase extends JobBase {
   public static final String EXPORT_MAP_TASKS_KEY =
       "sqoop.mapreduce.export.map.tasks";
 
+  /**
+   *  Maximal number of attempts for map task during export
+   *
+   *  Sqoop will default to "1" if this property is not set regardless of what is configured directly
+   *  in your hadoop configuration.
+   */
+  public static final String SQOOP_EXPORT_MAP_TASK_MAX_ATTEMTPS =
+    "sqoop.export.mapred.map.max.attempts";
+
+  /** Start and endtime captured for export job. */
+  private long startTime;
+  public static final String OPERATION = "export";
+
   protected ExportJobContext context;
 
 
@@ -92,6 +108,7 @@ public class ExportJobBase extends JobBase {
       final Class<? extends OutputFormat> outputFormatClass) {
     super(ctxt.getOptions(), mapperClass, inputFormatClass, outputFormatClass);
     this.context = ctxt;
+    this.startTime = new Date().getTime();
   }
 
   /**
@@ -112,18 +129,26 @@ public class ExportJobBase extends JobBase {
     FileSystem fs = p.getFileSystem(conf);
 
     try {
-      FileStatus stat = fs.getFileStatus(p);
+      FileStatus[] fileStatuses = fs.globStatus(p);
 
-      if (null == stat) {
+      if (null == fileStatuses) {
         // Couldn't get the item.
         LOG.warn("Input path " + p + " does not exist");
         return FileType.UNKNOWN;
       }
 
+      if (fileStatuses.length == 0) {
+        LOG.warn("Input path " + p + " does not match any file");
+        return FileType.UNKNOWN;
+      }
+
+      FileStatus stat = fileStatuses[0];
+
       if (stat.isDir()) {
-        FileStatus [] subitems = fs.listStatus(p);
+        Path dir = stat.getPath();
+        FileStatus [] subitems = fs.listStatus(dir);
         if (subitems == null || subitems.length == 0) {
-          LOG.warn("Input path " + p + " contains no files");
+          LOG.warn("Input path " + dir + " contains no files");
           return FileType.UNKNOWN; // empty dir.
         }
 
@@ -205,7 +230,7 @@ public class ExportJobBase extends JobBase {
     }
     Path inputPath = new Path(context.getOptions().getExportDir());
     Configuration conf = options.getConf();
-    inputPath = inputPath.makeQualified(FileSystem.get(conf));
+    inputPath = FileSystemUtil.makeQualified(inputPath, conf);
     return inputPath;
   }
 
@@ -327,7 +352,16 @@ public class ExportJobBase extends JobBase {
         + context.getConnManager().getClass().getName()
         + ". Please remove the parameter --direct");
     }
-
+    if (options.getAccumuloTable() != null && options.isDirect()
+        && !cmgr.isDirectModeAccumuloSupported()) {
+      throw new IOException("Direct mode is incompatible with "
+            + "Accumulo. Please remove the parameter --direct");
+    }
+    if (options.getHBaseTable() != null && options.isDirect()
+        && !cmgr.isDirectModeHBaseSupported()) {
+      throw new IOException("Direct mode is incompatible with "
+            + "HBase. Please remove the parameter --direct");
+    }
     if (stagingTableName != null) { // user has specified the staging table
       if (cmgr.supportsStagingForExport()) {
         LOG.info("Data will be staged in the table: " + stagingTableName);
@@ -407,12 +441,20 @@ public class ExportJobBase extends JobBase {
       setJob(job);
       boolean success = runJob(job);
       if (!success) {
+        LOG.error("Export job failed!");
         throw new ExportException("Export job failed!");
       }
 
       if (options.isValidationEnabled()) {
         validateExport(tableName, conf, job);
       }
+
+      if (isHCatJob) {
+        // Publish export job data for hcat export operation
+        LOG.info("Publishing HCatalog export job data to Listeners");
+        PublishJobData.publishJobData(conf, options, OPERATION, tableName, startTime);
+      }
+
     } catch (InterruptedException ie) {
       throw new IOException(ie);
     } catch (ClassNotFoundException cnfe) {
@@ -497,5 +539,26 @@ public class ExportJobBase extends JobBase {
    * Subclasses may override if necessary.
    */
   protected void jobTeardown(Job job) throws IOException, ExportException {
+  }
+
+  @Override
+  protected void propagateOptionsToJob(Job job) {
+    super.propagateOptionsToJob(job);
+    Configuration conf = job.getConfiguration();
+
+    // This is export job where re-trying failed mapper mostly don't make sense. By
+    // default we will force MR to run only one attempt per mapper. User or connector
+    // developer can override this behavior by setting SQOOP_EXPORT_MAP_TASK_MAX_ATTEMTPS:
+    //
+    // * Positive number - we will allow specified number of attempts
+    // * Negative number - we will default to Hadoop's default number of attempts
+    //
+    // This is important for most connectors as they are directly committing data to
+    // final table and hence re-running one mapper will lead to a misleading errors
+    // of inserting duplicate rows.
+    int sqoopMaxAttempts = conf.getInt(SQOOP_EXPORT_MAP_TASK_MAX_ATTEMTPS, 1);
+    if (sqoopMaxAttempts > 0) {
+      conf.setInt(HADOOP_MAP_TASK_MAX_ATTEMTPS, sqoopMaxAttempts);
+    }
   }
 }

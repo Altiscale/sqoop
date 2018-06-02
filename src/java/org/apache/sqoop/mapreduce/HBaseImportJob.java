@@ -120,6 +120,10 @@ public class HBaseImportJob extends DataDrivenImportJob {
     conf.set(HBasePutProcessor.ROW_KEY_COLUMN_KEY, rowKeyCol);
   }
 
+  protected boolean skipDelegationTokens(Configuration conf) {
+    return conf.getBoolean("sqoop.hbase.security.token.skip", false);
+  }
+
   @Override
   /** Create the target HBase table before running the job. */
   protected void jobSetup(Job job) throws IOException, ImportException {
@@ -136,57 +140,74 @@ public class HBaseImportJob extends DataDrivenImportJob {
       throw new ImportException(
           "Import to HBase error: Column family not specified");
     }
+    Method m = null;
+    try {
+      m = HBaseConfiguration.class.getMethod("merge",
+      Configuration.class, Configuration.class);
+    } catch (NoSuchMethodException nsme) {
+    }
 
-    // Add HBase configuration files to this conf object.
-    Configuration newConf = HBaseConfiguration.create(conf);
-    HBaseConfiguration.merge(conf, newConf);
+    if (m != null) {
+      // Add HBase configuration files to this conf object.
+
+      Configuration newConf = HBaseConfiguration.create(conf);
+      try {
+        m.invoke(null, conf, newConf);
+      } catch (Exception e) {
+        throw new ImportException(e);
+      }
+    } else {
+      HBaseConfiguration.addHbaseResources(conf);
+    }
 
     HBaseAdmin admin = new HBaseAdmin(conf);
 
-    // Add authentication token to the job if we're running on secure cluster.
-    //
-    // We're currently supporting HBase version 0.90 that do not have security
-    // patches which means that it do not have required methods
-    // "isSecurityEnabled" and "obtainAuthTokenForJob".
-    //
-    // We're using reflection API to see if those methods are available and call
-    // them only if they are present.
-    //
-    // After we will remove support for HBase 0.90 we can simplify the code to
-    // following code fragment:
-    /*
-    try {
-      if (User.isSecurityEnabled()) {
+    if (!skipDelegationTokens(conf)) {
+      // Add authentication token to the job if we're running on secure cluster.
+      //
+      // We're currently supporting HBase version 0.90 that do not have security
+      // patches which means that it do not have required methods
+      // "isSecurityEnabled" and "obtainAuthTokenForJob".
+      //
+      // We're using reflection API to see if those methods are available and call
+      // them only if they are present.
+      //
+      // After we will remove support for HBase 0.90 we can simplify the code to
+      // following code fragment:
+      /*
+      try {
+        if (User.isSecurityEnabled()) {
+          User user = User.getCurrent();
+          user.obtainAuthTokenForJob(conf, job);
+        }
+      } catch(InterruptedException ex) {
+        throw new ImportException("Can't get authentication token", ex);
+      }
+      */
+      try {
+        // Get method isSecurityEnabled
+        Method isHBaseSecurityEnabled = User.class.getMethod(
+            "isHBaseSecurityEnabled", Configuration.class);
+
+        // Get method obtainAuthTokenForJob
+        Method obtainAuthTokenForJob = User.class.getMethod(
+            "obtainAuthTokenForJob", Configuration.class, Job.class);
+
+        // Get current user
         User user = User.getCurrent();
-        user.obtainAuthTokenForJob(conf, job);
+
+        // Obtain security token if needed
+        if ((Boolean)isHBaseSecurityEnabled.invoke(null, conf)) {
+          obtainAuthTokenForJob.invoke(user, conf, job);
+        }
+      } catch (NoSuchMethodException e) {
+        LOG.info("It seems that we're running on HBase without security"
+            + " additions. Security additions will not be used during this job.");
+      } catch (InvocationTargetException e) {
+        throw new ImportException("Can't get authentication token", e);
+      } catch (IllegalAccessException e) {
+        throw new ImportException("Can't get authentication token", e);
       }
-    } catch(InterruptedException ex) {
-      throw new ImportException("Can't get authentication token", ex);
-    }
-    */
-    try {
-      // Get method isSecurityEnabled
-      Method isHBaseSecurityEnabled = User.class.getMethod(
-          "isHBaseSecurityEnabled", Configuration.class);
-
-      // Get method obtainAuthTokenForJob
-      Method obtainAuthTokenForJob = User.class.getMethod(
-        "obtainAuthTokenForJob", Configuration.class, Job.class);
-
-      // Get current user
-      User user = User.getCurrent();
-
-      // Obtain security token if needed
-      if ((Boolean)isHBaseSecurityEnabled.invoke(null, conf)) {
-        obtainAuthTokenForJob.invoke(user, conf, job);
-      }
-    } catch (NoSuchMethodException e) {
-      LOG.info("It seems that we're running on HBase without security"
-        + " additions. Security additions will not be used during this job.");
-    } catch (InvocationTargetException e) {
-      throw new ImportException("Can't get authentication token", e);
-    } catch (IllegalAccessException e) {
-      throw new ImportException("Can't get authentication token", e);
     }
 
     // Check to see if the table exists.
@@ -225,6 +246,10 @@ public class HBaseImportJob extends DataDrivenImportJob {
         }
       }
     }
+
+    // Make sure we close the connection to HBA, this is only relevant in
+    // unit tests
+    admin.close();
 
     // Make sure HBase libraries are shipped as part of the job.
     TableMapReduceUtil.addDependencyJars(job);

@@ -31,11 +31,14 @@ import org.apache.hadoop.mapreduce.InputSplit;
 import com.cloudera.sqoop.config.ConfigurationHelper;
 import com.cloudera.sqoop.mapreduce.db.BigDecimalSplitter;
 import com.cloudera.sqoop.mapreduce.db.DataDrivenDBInputFormat;
+import org.apache.sqoop.validation.ValidationException;
 
 /**
  * Implement DBSplitter over text strings.
  */
 public class TextSplitter extends BigDecimalSplitter {
+
+  public static final String ALLOW_TEXT_SPLITTER_PROPERTY = "org.apache.sqoop.splitter.allow_text_splitter";
 
   private static final Log LOG = LogFactory.getLog(TextSplitter.class);
 
@@ -59,7 +62,11 @@ public class TextSplitter extends BigDecimalSplitter {
    * points, then map the resulting floating point values back into strings.
    */
   public List<InputSplit> split(Configuration conf, ResultSet results,
-      String colName) throws SQLException {
+      String colName) throws SQLException, ValidationException {
+    if (!conf.getBoolean(ALLOW_TEXT_SPLITTER_PROPERTY, false)) {
+      throw new ValidationException("Generating splits for a textual index column " + "allowed only in case of \"-D"
+          + ALLOW_TEXT_SPLITTER_PROPERTY + "=true\" property " + "passed as a parameter");
+    }
 
     LOG.warn("Generating splits for a textual index column.");
     LOG.warn("If your database sorts in a case-insensitive order, "
@@ -146,10 +153,15 @@ public class TextSplitter extends BigDecimalSplitter {
   }
 
   public List<String> split(int numSplits, String minString,
-      String maxString, String commonPrefix) throws SQLException {
+      String maxString, String commonPrefix) throws SQLException, ValidationException {
 
     BigDecimal minVal = stringToBigDecimal(minString);
     BigDecimal maxVal = stringToBigDecimal(maxString);
+
+
+    if (minVal.compareTo(maxVal) > 0) {
+        throw new ValidationException( minVal + " is greater than " + maxVal);
+    }
 
     List<BigDecimal> splitPoints = split(
         new BigDecimal(numSplits), minVal, maxVal);

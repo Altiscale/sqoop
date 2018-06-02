@@ -23,6 +23,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.sql.Connection;
+import java.sql.ResultSet;
 import java.sql.Statement;
 import java.sql.SQLException;
 
@@ -37,6 +38,12 @@ import org.junit.Before;
 import com.cloudera.sqoop.SqoopOptions;
 import com.cloudera.sqoop.TestExport;
 import com.cloudera.sqoop.mapreduce.MySQLExportMapper;
+import org.junit.Ignore;
+import org.junit.Test;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 /**
  * Test the DirectMySQLManager implementation's exportJob() functionality.
@@ -51,6 +58,7 @@ public class DirectMySQLExportTest extends TestExport {
   // instance variables populated during setUp, used during tests.
   private DirectMySQLManager manager;
   private Connection conn;
+  private MySQLTestUtils mySQLTestUtils = new MySQLTestUtils();
 
   @Override
   protected Connection getConnection() {
@@ -64,7 +72,7 @@ public class DirectMySQLExportTest extends TestExport {
 
   @Override
   protected String getConnectString() {
-    return MySQLTestUtils.CONNECT_STRING;
+    return mySQLTestUtils.getMySqlConnectString();
   }
 
   @Override
@@ -81,9 +89,10 @@ public class DirectMySQLExportTest extends TestExport {
   public void setUp() {
     super.setUp();
 
-    SqoopOptions options = new SqoopOptions(MySQLTestUtils.CONNECT_STRING,
+    SqoopOptions options = new SqoopOptions(mySQLTestUtils.getMySqlConnectString(),
         getTableName());
-    options.setUsername(MySQLTestUtils.getCurrentUser());
+    options.setUsername(mySQLTestUtils.getUserName());
+    mySQLTestUtils.addPasswordIfIsSet(options);
     this.manager = new DirectMySQLManager(options);
 
     try {
@@ -98,6 +107,13 @@ public class DirectMySQLExportTest extends TestExport {
 
   @After
   public void tearDown() {
+    try {
+      Statement stmt = conn.createStatement();
+      stmt.execute(getDropTableStatement(getTableName()));
+    } catch(SQLException e) {
+      LOG.error("Can't clean up the database:", e);
+    }
+
     super.tearDown();
 
     if (null != this.conn) {
@@ -107,40 +123,18 @@ public class DirectMySQLExportTest extends TestExport {
         LOG.error("Got SQLException closing conn: " + sqlE.toString());
       }
     }
-
-    if (null != manager) {
-      try {
-        manager.close();
-        manager = null;
-      } catch (SQLException sqlE) {
-        LOG.error("Got SQLException: " + sqlE.toString());
-        fail("Got SQLException: " + sqlE.toString());
-      }
-    }
   }
 
   @Override
   protected String [] getCodeGenArgv(String... extraArgs) {
-
-    String [] moreArgs = new String[extraArgs.length + 2];
-    int i = 0;
-    for (i = 0; i < extraArgs.length; i++) {
-      moreArgs[i] = extraArgs[i];
-    }
-
-    // Add username argument for mysql.
-    moreArgs[i++] = "--username";
-    moreArgs[i++] = MySQLTestUtils.getCurrentUser();
-
-    return super.getCodeGenArgv(moreArgs);
+    return super.getCodeGenArgv(mySQLTestUtils.addUserNameAndPasswordToArgs(extraArgs));
   }
 
   @Override
   protected String [] getArgv(boolean includeHadoopFlags,
       int rowsPerStatement, int statementsPerTx, String... additionalArgv) {
 
-    String [] subArgv = newStrArray(additionalArgv, "--direct",
-        "--username", MySQLTestUtils.getCurrentUser());
+    String [] subArgv = newStrArray(mySQLTestUtils.addUserNameAndPasswordToArgs(additionalArgv),"--direct");
     return super.getArgv(includeHadoopFlags, rowsPerStatement,
         statementsPerTx, subArgv);
   }
@@ -148,6 +142,7 @@ public class DirectMySQLExportTest extends TestExport {
   /**
    * Test a single mapper that runs several transactions serially.
    */
+  @Test
   public void testMultiTxExport() throws IOException, SQLException {
     multiFileTest(1, 20, 1,
         "-D", MySQLExportMapper.MYSQL_CHECKPOINT_BYTES_KEY + "=10");
@@ -156,6 +151,7 @@ public class DirectMySQLExportTest extends TestExport {
   /**
    * Test an authenticated export using mysqlimport.
    */
+  @Test
   public void testAuthExport() throws IOException, SQLException {
     SqoopOptions options = new SqoopOptions(MySQLAuthTest.AUTH_CONNECT_STRING,
         getTableName());
@@ -222,16 +218,128 @@ public class DirectMySQLExportTest extends TestExport {
     }
   }
 
+  /**
+   * Test an authenticated export using mysqlimport.
+   */
+  @Test
+  public void testEscapedByExport() throws IOException, SQLException {
+    SqoopOptions options = new SqoopOptions(MySQLAuthTest.AUTH_CONNECT_STRING,
+        getTableName());
+    options.setUsername(MySQLAuthTest.AUTH_TEST_USER);
+    options.setPassword(MySQLAuthTest.AUTH_TEST_PASS);
 
-  @Override
-  public void testMultiMapTextExportWithStaging()
-    throws IOException, SQLException {
-    // disable this test as staging is not supported in direct mode
+    manager = new DirectMySQLManager(options);
+
+    Connection connection = null;
+    Statement st = null;
+
+    String tableName = getTableName();
+
+    try {
+      connection = manager.getConnection();
+      connection.setAutoCommit(false);
+      st = connection.createStatement();
+
+      // create a target database table.
+      st.executeUpdate("DROP TABLE IF EXISTS " + tableName);
+      st.executeUpdate("CREATE TABLE " + tableName + " ("
+          + "id INT NOT NULL PRIMARY KEY, "
+          + "msg VARCHAR(24) NOT NULL, "
+          + "value VARCHAR(100) NOT NULL)");
+      connection.commit();
+
+      // Write a file containing a record to export.
+      Path tablePath = getTablePath();
+      Path filePath = new Path(tablePath, "datafile");
+      Configuration conf = new Configuration();
+      conf.set("fs.default.name", "file:///");
+
+      ColumnGenerator gen = new ColumnGenerator() {
+        public String getExportText(int rowNum) {
+          return "||" + rowNum;
+        }
+        public String getVerifyText(int rowNum) {
+          return "|" + rowNum;
+        }
+        public String getType() {
+          return "STRING";
+        }
+      };
+
+      FileSystem fs = FileSystem.get(conf);
+      fs.mkdirs(tablePath);
+      OutputStream os = fs.create(filePath);
+      BufferedWriter w = new BufferedWriter(new OutputStreamWriter(os));
+      w.write(getRecordLine(0, gen));
+      w.write(getRecordLine(1, gen));
+      w.write(getRecordLine(2, gen));
+      w.close();
+      os.close();
+
+      // run the export and verify that the results are good.
+      runExport(getArgv(true, 10, 10,
+          "--username", MySQLAuthTest.AUTH_TEST_USER,
+          "--password", MySQLAuthTest.AUTH_TEST_PASS,
+          "--connect", MySQLAuthTest.AUTH_CONNECT_STRING,
+          "--escaped-by", "|"));
+      verifyExport(3, connection);
+      verifyTableColumnContents(connection, tableName, "value", gen);
+    } catch (SQLException sqlE) {
+      LOG.error("Encountered SQL Exception: " + sqlE);
+      sqlE.printStackTrace();
+      fail("SQLException when accessing target table. " + sqlE);
+    } finally {
+      try {
+        if (null != st) {
+          st.close();
+        }
+
+        if (null != connection) {
+          connection.close();
+        }
+      } catch (SQLException sqlE) {
+        LOG.warn("Got SQLException when closing connection: " + sqlE);
+      }
+    }
   }
 
+  @Ignore("Ignoring this test as staging is not supported in direct mode.")
   @Override
+  @Test
+  public void testMultiMapTextExportWithStaging()
+    throws IOException, SQLException {
+  }
+
+  @Ignore("Ignoring this test as staging is not supported in direct mode.")
+  @Override
+  @Test
   public void testMultiTransactionWithStaging()
     throws IOException, SQLException {
-    // disable this test as staging is not supported in direct mode
+  }
+
+  @Ignore("Ignoring this test as --input-null-non-string is not supported in direct mode.")
+  @Override
+  @Test
+  public void testLessColumnsInFileThanInTableInputNullIntPassed() throws IOException, SQLException {
+  }
+
+  @Ignore("Ignoring this test as --input-null-string is not supported in direct mode.")
+  @Override
+  @Test
+  public void testLessColumnsInFileThanInTableInputNullStringPassed() throws IOException, SQLException {
+  }
+
+  private void verifyTableColumnContents(Connection connection,
+    String table, String column, ColumnGenerator gen)
+      throws IOException, SQLException {
+    Statement st = connection.createStatement();
+
+    // create a target database table.
+    assertTrue(st.execute("SELECT " + column + " FROM " + table));
+    ResultSet rs = st.getResultSet();
+
+    for (int row = 0; rs.next(); ++row) {
+      assertEquals(gen.getVerifyText(row), rs.getString(1));
+    }
   }
 }

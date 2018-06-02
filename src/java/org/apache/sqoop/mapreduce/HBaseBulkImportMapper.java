@@ -25,6 +25,7 @@ import java.util.Map;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hbase.client.Mutation;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
 import org.apache.hadoop.io.LongWritable;
@@ -54,7 +55,7 @@ public class HBaseBulkImportMapper
   protected void setup(Context context)
       throws IOException, InterruptedException {
     this.conf = context.getConfiguration();
-    this.lobLoader = new LargeObjectLoader(this.conf);
+    this.lobLoader = new LargeObjectLoader(this.conf, new Path( this.conf.get("sqoop.hbase.lob.extern.dir", "/tmp/sqoop-hbase-" + context.getTaskAttemptID())));
 
     // Get the implementation of PutTransformer to use.
     // By default, we call toString() on every non-null field.
@@ -66,8 +67,7 @@ public class HBaseBulkImportMapper
     if (null == putTransformer) {
       throw new RuntimeException("Could not instantiate PutTransformer.");
     }
-    this.putTransformer.setColumnFamily(conf.get(COL_FAMILY_KEY, null));
-    this.putTransformer.setRowKeyColumn(conf.get(ROW_KEY_COLUMN_KEY, null));
+    putTransformer.init(conf);
   }
   @Override
   public void map(LongWritable key, SqoopRecord val, Context context)
@@ -80,9 +80,12 @@ public class HBaseBulkImportMapper
     }
     Map<String, Object> fields = val.getFieldMap();
 
-    List<Put> putList = putTransformer.getPutCommand(fields);
-    for(Put put: putList){
-      context.write(new ImmutableBytesWritable(put.getRow()), put);
+    List<Mutation> mutationList = putTransformer.getMutationCommand(fields);
+    for(Mutation mutation: mutationList){
+      if(mutation != null && mutation instanceof Put) {
+        Put putObject = (Put) mutation;
+        context.write(new ImmutableBytesWritable(putObject.getRow()), putObject);
+      }
     }
   }
   @Override

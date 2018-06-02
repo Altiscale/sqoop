@@ -24,30 +24,33 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.io.Writer;
+import java.nio.charset.StandardCharsets;
 import java.util.Date;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 
+import org.apache.commons.lang.StringEscapeUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.io.BytesWritable;
 import org.apache.sqoop.mapreduce.ImportJobBase;
 
 import com.cloudera.sqoop.SqoopOptions;
-import com.cloudera.sqoop.manager.ConnManager;
 import com.cloudera.sqoop.lib.BigDecimalSerializer;
+import com.cloudera.sqoop.lib.BlobRef;
 import com.cloudera.sqoop.lib.BooleanParser;
+import com.cloudera.sqoop.lib.ClobRef;
 import com.cloudera.sqoop.lib.DelimiterSet;
 import com.cloudera.sqoop.lib.FieldFormatter;
 import com.cloudera.sqoop.lib.JdbcWritableBridge;
 import com.cloudera.sqoop.lib.LargeObjectLoader;
 import com.cloudera.sqoop.lib.LobSerializer;
 import com.cloudera.sqoop.lib.RecordParser;
-import com.cloudera.sqoop.lib.BlobRef;
-import com.cloudera.sqoop.lib.ClobRef;
 import com.cloudera.sqoop.lib.SqoopRecord;
+import com.cloudera.sqoop.manager.ConnManager;
 
 /**
  * Creates an ORM class to represent a table from a database.
@@ -116,6 +119,12 @@ public class ClassWriter {
     JAVA_RESERVED_WORDS.add("void");
     JAVA_RESERVED_WORDS.add("volatile");
     JAVA_RESERVED_WORDS.add("while");
+
+    // not strictly reserved words, but collides with
+    // our imports
+    JAVA_RESERVED_WORDS.add("Text");
+    //Fix For Issue SQOOP-2839
+    JAVA_RESERVED_WORDS.add("PROTOCOL_VERSION");
   }
 
   public static final String PROPERTY_CODEGEN_METHODS_MAXCOLS =
@@ -270,7 +279,7 @@ public class ClassWriter {
      * column "9isLegalInSql" was translated into "_9isLegalInSql" in original
      * code and will translate to same "_9isLegalInSql" now. However it would
      * be translated to "__9isLegalInSql" (notice that there are two "_" at the
-     * begging) if we would use output.startsWith instead.
+     * beginning) if we would use output.startsWith instead.
      */
     } else if (candidate.startsWith("_")) {
       return "_" + output;
@@ -280,10 +289,9 @@ public class ClassWriter {
   }
 
   private String toJavaType(String columnName, int sqlType) {
-    Properties mapping = options.getMapColumnJava();
-
-    if (mapping.containsKey(columnName)) {
-      String type = mapping.getProperty(columnName);
+    Properties columnMapping = options.getColumnNames();
+    if (null != columnMapping && columnMapping.containsKey(columnName)) {
+      String type = (String) columnMapping.get(columnName);
       if (LOG.isDebugEnabled()) {
         LOG.info("Overriding type of column " + columnName + " to " + type);
       }
@@ -888,8 +896,12 @@ public class ClassWriter {
         continue;
       }
 
-      sb.append("    JdbcWritableBridge." + setterMethod + "(" + col + ", "
-          + (i + 1) + " + __off, " + sqlType + ", __dbStmt);\n");
+      if ("writeString".equals(setterMethod) && sqlType == 2002) {
+        sb.append("__dbStmt.setString(" + (i + 1) + ", " + col + ");\n");
+      } else {
+        sb.append("    JdbcWritableBridge." + setterMethod + "(" + col + ", " + (i + 1) + " + __off, " + sqlType
+            + ", __dbStmt);\n");
+      }
     }
 
     if (wrapInMethod) {
@@ -1057,55 +1069,61 @@ public class ClassWriter {
    * @param colNames - ordered list of column names for table.
    * @param sb - StringBuilder to append code to
    */
-  private void generateSetField(Map<String, Integer> columnTypes,
-      String [] colNames, StringBuilder sb) {
+  private void generateSetField(Map<String, Integer> columnTypes, String[] colNames, String[] rawColNames,
+      StringBuilder sb) {
+    String sep = System.getProperty("line.separator");
+    sb.append("  public void setField(String __fieldName, Object __fieldVal) " + "{" + sep);
+    sb.append("    if (!setters.containsKey(__fieldName)) {" + sep);
+    sb.append("      throw new RuntimeException(\"No such field:\"+__fieldName);" + sep);
+    sb.append("    }" + sep);
+    sb.append("    setters.get(__fieldName).setField(__fieldVal);" + sep);
+    sb.append("  }\n" + sep);
+  }
 
-    int numberOfMethods =
-            this.getNumberOfMethods(colNames, maxColumnsPerMethod);
-
-    sb.append("  public void setField(String __fieldName, Object __fieldVal) "
-        + "{\n");
-    if (numberOfMethods > 1) {
-      boolean first = true;
-      for (int i = 0; i < numberOfMethods; ++i) {
-        if (!first) {
-          sb.append("    else");
-        }
-        sb.append("    if (this.setField" + i
-                + "(__fieldName, __fieldVal)) {\n");
-        sb.append("      return;\n");
-        sb.append("    }\n");
-        first = false;
-      }
-    } else {
-      boolean first = true;
-      for (String colName : colNames) {
-        int sqlType = columnTypes.get(colName);
+  private void generateConstructorAndInitMethods(Map<String, Integer> colTypes, String[] colNames, String[] rawColNames,
+      String typeName, StringBuilder sb) {
+    String sep = System.getProperty("line.separator");
+    int numberOfMethods = getNumberOfMethods(colNames, maxColumnsPerMethod);
+    for (int methodNumber = 0; methodNumber < numberOfMethods; ++methodNumber) {
+      sb.append("  private void init" + methodNumber + "() {" + sep);
+      for (int i = methodNumber * maxColumnsPerMethod; i < topBoundary(colNames, methodNumber,
+          maxColumnsPerMethod); ++i) {
+        String colName = colNames[i];
+        String rawColName = rawColNames[i];
+        int sqlType = colTypes.get(colName);
         String javaType = toJavaType(colName, sqlType);
         if (null == javaType) {
+          LOG.error("Cannot resolve SQL type " + sqlType);
           continue;
         } else {
-          if (!first) {
-            sb.append("    else");
-          }
-
-          sb.append("    if (\"" + colName + "\".equals(__fieldName)) {\n");
-          sb.append("      this." + colName + " = (" + javaType
-              + ") __fieldVal;\n");
-          sb.append("    }\n");
-          first = false;
+          sb.append("    setters.put(\"" + serializeRawColName(rawColName) + "\", new FieldSetterCommand() {" + sep);
+          sb.append("      @Override" + sep);
+          sb.append("      public void setField(Object value) {" + sep);
+          sb.append("        " +typeName+".this." + colName + " = (" + javaType + ")value;" + sep);
+          sb.append("      }" + sep);
+          sb.append("    });" + sep);
         }
       }
+      sb.append("  }" + sep);
     }
-    sb.append("    else {\n");
-    sb.append("      throw new RuntimeException(");
-    sb.append("\"No such field: \" + __fieldName);\n");
-    sb.append("    }\n");
-    sb.append("  }\n");
-
+    sb.append("  public " + typeName + "() {" + sep);
     for (int i = 0; i < numberOfMethods; ++i) {
-      myGenerateSetField(columnTypes, colNames, sb, i, maxColumnsPerMethod);
+      sb.append("    init" + i + "();" + sep);
     }
+    sb.append("  }" + sep);
+  }
+  /**
+   * Raw column name is a column name as it was created on database and we need to serialize it between
+   * double quotes into java class that will be further complied with javac. Various databases supports
+   * various edge conditions for column names, so we can't assume that raw column name can be just passed
+   * between double quotes and everything will work correctly. That will break for databases that supports
+   * double quotes in column name as that will result in "column with "" which is invalid.
+   *
+   * @param name Raw column name to escape
+   * @return
+   */
+  private String serializeRawColName(String name) {
+    return StringEscapeUtils.escapeJava(name);
   }
 
   /**
@@ -1117,7 +1135,7 @@ public class ClassWriter {
    * @param size - number of columns per method
    */
   private void myGenerateSetField(Map<String, Integer> columnTypes,
-                                  String[] colNames, StringBuilder sb,
+                                  String[] colNames, String[] rawColNames, StringBuilder sb,
                                   int methodNumber, int size) {
     sb.append("  public boolean setField" + methodNumber
             + "(String __fieldName, Object __fieldVal) {\n");
@@ -1126,6 +1144,7 @@ public class ClassWriter {
     for (int i = methodNumber * size;
          i < topBoundary(colNames, methodNumber, size); ++i) {
       String colName = colNames[i];
+      String rawColName = rawColNames[i];
       int sqlType = columnTypes.get(colName);
       String javaType = toJavaType(colName, sqlType);
       if (null == javaType) {
@@ -1135,7 +1154,7 @@ public class ClassWriter {
           sb.append("    else");
         }
 
-        sb.append("    if (\"" + colName + "\".equals(__fieldName)) {\n");
+        sb.append("    if (\"" + serializeRawColName(rawColName) + "\".equals(__fieldName)) {\n");
         sb.append("      this." + colName + " = (" + javaType
             + ") __fieldVal;\n");
         sb.append("      return true;\n");
@@ -1156,26 +1175,26 @@ public class ClassWriter {
    * @param sb - StringBuilder to append code to
    */
   private void generateGetFieldMap(Map<String, Integer> columnTypes,
-      String [] colNames, StringBuilder sb) {
+      String [] colNames, String [] rawColNames, StringBuilder sb) {
     int numberOfMethods =
             this.getNumberOfMethods(colNames, maxColumnsPerMethod);
 
     sb.append("  public Map<String, Object> getFieldMap() {\n");
     sb.append("    Map<String, Object> __sqoop$field_map = "
-        + "new TreeMap<String, Object>();\n");
+        + "new HashMap<String, Object>();\n");
     if (numberOfMethods > 1) {
       for (int i = 0; i < numberOfMethods; ++i) {
         sb.append("    this.getFieldMap" + i + "(__sqoop$field_map);\n");
       }
     } else {
-      myGenerateGetFieldMap(columnTypes, colNames, sb, 0,
+      myGenerateGetFieldMap(columnTypes, colNames, rawColNames, sb, 0,
               maxColumnsPerMethod, false);
     }
     sb.append("    return __sqoop$field_map;\n");
     sb.append("  }\n\n");
 
     for (int i = 0; i < numberOfMethods; ++i) {
-      myGenerateGetFieldMap(columnTypes, colNames, sb, i,
+      myGenerateGetFieldMap(columnTypes, colNames, rawColNames, sb, i,
               maxColumnsPerMethod, true);
     }
   }
@@ -1190,7 +1209,7 @@ public class ClassWriter {
    * @param wrapInMethod - wrap body in a method.
    */
   private void myGenerateGetFieldMap(Map<String, Integer> columnTypes,
-                                     String[] colNames, StringBuilder sb,
+                                     String[] colNames, String[] rawColNames, StringBuilder sb,
                                      int methodNumber, int size,
                                      boolean wrapInMethod) {
     if (wrapInMethod) {
@@ -1200,9 +1219,7 @@ public class ClassWriter {
 
     for (int i = methodNumber * size;
          i < topBoundary(colNames, methodNumber, size); ++i) {
-      String colName = colNames[i];
-      sb.append("    __sqoop$field_map.put(\"" + colName + "\", this."
-          + colName + ");\n");
+      sb.append("    __sqoop$field_map.put(\"" + serializeRawColName(rawColNames[i]) + "\", this." + colNames[i] + ");\n");
     }
 
     if (wrapInMethod) {
@@ -1392,8 +1409,21 @@ public class ClassWriter {
   private void parseColumn(String colName, int colType, StringBuilder sb) {
     // assume that we have __it and __cur_str vars, based on
     // __loadFromFields() code.
-    sb.append("    __cur_str = __it.next();\n");
+
     String javaType = toJavaType(colName, colType);
+
+    String nullValue;
+    if (javaType.equals("String")) {
+      nullValue = this.options.getInNullStringValue();
+    } else {
+      nullValue = this.options.getInNullNonStringValue();
+    }
+
+    sb.append("    if (__it.hasNext()) {\n");
+    sb.append("        __cur_str = __it.next();\n");
+    sb.append("    } else {\n");
+    sb.append("        __cur_str = \"" + nullValue + "\";\n");
+    sb.append("    }\n");
 
     parseNullVal(javaType, colName, sb);
     if (javaType.equals("String")) {
@@ -1614,7 +1644,7 @@ public class ClassWriter {
    * @return a list of column names in the same order which are
    * cleaned up to be used as identifiers in the generated Java class.
    */
-  private String [] cleanColNames(String [] colNames) {
+  public static String [] cleanColNames(String [] colNames) {
     String [] cleanedColNames = new String[colNames.length];
     for (int i = 0; i < colNames.length; i++) {
       String col = colNames[i];
@@ -1687,7 +1717,8 @@ public class ClassWriter {
     }
 
     // Check that all explicitly mapped columns are present in result set
-    Properties mapping = options.getMapColumnJava();
+    Properties mapping = options.getColumnNames();
+
     if (mapping != null && !mapping.isEmpty()) {
       for(Object column : mapping.keySet()) {
         if (!uniqColNames.contains((String)column)) {
@@ -1730,7 +1761,7 @@ public class ClassWriter {
 
     // Generate the Java code.
     StringBuilder sb = generateClassForColumns(columnTypes,
-        cleanedColNames, cleanedDbWriteColNames);
+        cleanedColNames, cleanedDbWriteColNames, colNames);
     // Write this out to a file in the jar output directory.
     // We'll move it to the user-visible CodeOutputDir after compiling.
     String codeOutDir = options.getJarOutputDir();
@@ -1770,7 +1801,7 @@ public class ClassWriter {
     Writer writer = null;
     try {
       ostream = new FileOutputStream(filename);
-      writer = new OutputStreamWriter(ostream);
+      writer = new OutputStreamWriter(ostream, StandardCharsets.UTF_8);
       writer.append(sb.toString());
     } finally {
       if (null != writer) {
@@ -1807,7 +1838,18 @@ public class ClassWriter {
       // These column names were provided by the user. They may not be in
       // the same case as the keys in the columnTypes map. So make sure
       // we add the appropriate aliases in that map.
-      for (String userColName : colNames) {
+      // We also have to strip surrounding quotes if any.
+      String[] fixedColNames = new String[colNames.length];
+      for (int i = 0; i < colNames.length; ++i) {
+        String userColName = colNames[i];
+
+        // Remove surrounding quotes if any
+        int len = userColName.length();
+        if (len > 2 && userColName.charAt(0) == '"' &&  userColName.charAt(len -1) == '"') {
+          userColName = userColName.substring(1, len -1);
+        }
+
+        fixedColNames[i] = userColName;
         for (Map.Entry<String, Integer> typeEntry : columnTypes.entrySet()) {
           String typeColName = typeEntry.getKey();
           if (typeColName.equalsIgnoreCase(userColName)
@@ -1820,6 +1862,7 @@ public class ClassWriter {
           }
         }
       }
+      colNames = fixedColNames;
     }
     return colNames;
   }
@@ -1829,6 +1872,14 @@ public class ClassWriter {
       return connManager.getColumnTypes(tableName, options.getSqlQuery());
     } else {
       return connManager.getColumnTypesForProcedure(options.getCall());
+    }
+  }
+
+  protected Map<String, List<Integer>> getColumnInfo() throws IOException {
+    if (options.getCall() == null) {
+      return connManager.getColumnInfo(tableName, options.getSqlQuery());
+    } else {
+      return connManager.getColumnInfoForProcedure(options.getCall());
     }
   }
 
@@ -1842,7 +1893,7 @@ public class ClassWriter {
    */
   private StringBuilder generateClassForColumns(
       Map<String, Integer> columnTypes,
-      String [] colNames, String [] dbWriteColNames) {
+      String [] colNames, String [] dbWriteColNames, String [] rawColNames) {
     if (colNames.length ==0) {
       throw new IllegalArgumentException("Attempted to generate class with "
           + "no columns!");
@@ -1894,7 +1945,7 @@ public class ClassWriter {
     sb.append("import java.util.Iterator;\n");
     sb.append("import java.util.List;\n");
     sb.append("import java.util.Map;\n");
-    sb.append("import java.util.TreeMap;\n");
+    sb.append("import java.util.HashMap;\n");
     sb.append("\n");
 
     String className = tableNameInfo.getShortClassForTable(tableName);
@@ -1904,7 +1955,12 @@ public class ClassWriter {
         + CLASS_WRITER_VERSION + ";\n");
     sb.append(
         "  public int getClassFormatVersion() { return PROTOCOL_VERSION; }\n");
+    sb.append("  public static interface FieldSetterCommand {");
+    sb.append("    void setField(Object value);");
+    sb.append("  }");
     sb.append("  protected ResultSet __cur_result_set;\n");
+    sb.append("  private Map<String, FieldSetterCommand> setters = new HashMap<String, FieldSetterCommand>();\n");
+    generateConstructorAndInitMethods(columnTypes, colNames, rawColNames, className, sb);
     generateFields(columnTypes, colNames, className, sb);
     generateEquals(columnTypes, colNames, className, sb);
     generateDbRead(columnTypes, colNames, sb);
@@ -1915,8 +1971,8 @@ public class ClassWriter {
     generateToString(columnTypes, colNames, sb);
     generateParser(columnTypes, colNames, sb);
     generateCloneMethod(columnTypes, colNames, sb);
-    generateGetFieldMap(columnTypes, colNames, sb);
-    generateSetField(columnTypes, colNames, sb);
+    generateGetFieldMap(columnTypes, colNames, rawColNames, sb);
+    generateSetField(columnTypes, colNames, rawColNames, sb);
 
     // TODO(aaron): Generate hashCode(), compareTo(), equals() so it can be a
     // WritableComparable

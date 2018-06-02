@@ -294,8 +294,6 @@ Argument                                 Description
 +\--table <table-name>+                  Table to populate
 +\--input-null-string <null-string>+     The string to be interpreted as\
                                          null for string columns
-+\--clear-staging-table+                 Indicates that any data present in\
-                                         the staging table can be deleted.
 ---------------------------------------------------------------------------------
 
 There are additional configuration for pg_bulkload execution
@@ -306,34 +304,36 @@ it must preceed any export control arguments.
 
 .Supported export control properties:
 [grid="all"]
-`-----------------------------`----------------------------------------------
-Property                      Description
+`------------------------------`----------------------------------------------
+Property                       Description
 -----------------------------------------------------------------------------
-mapred.reduce.tasks           Number of reduce tasks for staging. \
-                              The defalt value is 1. \
-                              Each tasks do staging in a single transaction.
-pgbulkload.bin                Path of the pg_bulkoad binary \
-                              installed on each slave nodes.
-pgbulkload.check.constraints  Specify whether CHECK constraints are checked \
-                              during the loading. \
-                              The default value is YES.
-pgbulkload.parse.errors       The maximum mumber of ingored records \
-                              that cause errors during parsing, \
-                              encoding, filtering, constraints checking, \
-                              and data type conversion. \
-                              Error records are recorded \
-                              in the PARSE BADFILE.  \
-                              The default value is INFINITE.
-pgbulkload.duplicate.errors   Number of ingored records \
-                              that violate unique constraints. \
-                              Duplicated records are recorded in the \
-                              DUPLICATE BADFILE on DB server. \
-                              The default value is INFINITE.
-pgbulkload.filter             Specify the filter function \
-                              to convert each row in the input file.  \
-                              See the pg_bulkload documentation to know \
-                              how to write FILTER functions.
------------------------------------------------------------------------------
+mapred.reduce.tasks            Number of reduce tasks for staging. \
+                               The defalt value is 1. \
+                               Each tasks do staging in a single transaction.
+pgbulkload.bin                 Path of the pg_bulkoad binary \
+                               installed on each slave nodes.
+pgbulkload.check.constraints   Specify whether CHECK constraints are checked \
+                               during the loading. \
+                               The default value is YES.
+pgbulkload.parse.errors        The maximum mumber of ingored records \
+                               that cause errors during parsing, \
+                               encoding, filtering, constraints checking, \
+                               and data type conversion. \
+                               Error records are recorded \
+                               in the PARSE BADFILE.  \
+                               The default value is INFINITE.
+pgbulkload.duplicate.errors    Number of ingored records \
+                               that violate unique constraints. \
+                               Duplicated records are recorded in the \
+                               DUPLICATE BADFILE on DB server. \
+                               The default value is INFINITE.
+pgbulkload.filter              Specify the filter function \
+                               to convert each row in the input file.  \
+                               See the pg_bulkload documentation to know \
+                               how to write FILTER functions.
+pgbulkload.clear.staging.table Indicates that any data present in\
+                               the staging table can be dropped.
+------------------------------------------------------------------------------
 
 Here is a example of complete command line.
 ----
@@ -381,16 +381,47 @@ Argument                              Description
                                       of data slices of a table or all\
                                       Default is "false" for standard mode\
                                       and "true" for direct mode.
-+--max-errors+                        Applicable only in direct mode.\
++--max-errors+                        Applicable only for direct mode export.\
                                       This option specifies the error threshold\
                                       per mapper while transferring data. If\
                                       the number of errors encountered exceed\
                                       this threshold then the job will fail.
                                       Default value is 1.
-+--log-dir+                           Applicable only in direct mode.\
++--log-dir+                           Applicable only for direct mode export.\
                                       Specifies the directory where Netezza\
-                                      external table operation logs are stored.\
-                                      Default value is /tmp.
+                                      external table operation logs are stored\
+                                      on the hadoop filesystem.  Logs are\
+                                      stored under this directory with one\
+                                      directory for the job and sub-directories\
+                                      for each task number and attempt.\
+                                      Default value is the user home directory.\
+                                      The nzlog and nzbad files will be under
+                                      (logdir)/job-id/job-attempt-id.
++--trunc-string+                      Applicable only for direct mode export.\
+                                      Specifies whether the system \
+                                      truncates strings to the declared\
+                                      storage and loads the data. By default\
+                                      truncation of strings is reported as an\
+                                      error.
++--ctrl-chars+                        Applicable only for direct mode export.\
+                                      Specifies whether control characters \
+                                      (ASCII chars 1 - 31) can be allowed \
+                                      to be part of char/nchar/varchar/nvarchar\
+                                      columns.  Default is false.
++--crin-string+                       Applicable only for direct mode export.\
+                                      Specifies whether carriage return \
+                                      (ASCII char 13) can be allowed \
+                                      to be part of char/nchar/varchar/nvarchar\
+                                      columns.  Note that CR can no longer \
+                                      be a record delimiter with this option.\
+                                      Default is false.
++--ignore-zero+                       Applicable only for direct mode export.\
+                                      Specifies whether NUL character \
+                                      (ASCII char 0) should be scanned \
+                                      and ignored as part of the data loaded\
+                                      into char/nchar/varchar/nvarchar \
+                                      columns.\
+                                      Default is false.
 --------------------------------------------------------------------------------
 
 
@@ -522,7 +553,8 @@ with the following attributes:
 is a table.
 +
 NOTE: Data Connector for Oracle and Hadoop does not process index-organized
-tables.
+tables unless the table is partitioned and +oraoop.chunk.method+ is set
+to +PARTITION+
 
 - There are at least 2 mappers — Jobs where the Sqoop command-line does not
 include: +--num-mappers 1+
@@ -613,6 +645,7 @@ select_catalog_role role or all of the following object privileges:
 - +select on dba_objects+
 - +select on dba_extents+
 - +select on dba_segments+ — Required for Sqoop imports only
+- +select on dba_constraints+ — Required for Sqoop imports only
 - +select on v_$database+ — Required for Sqoop imports only
 - +select on v_$parameter+ — Required for Sqoop imports only
 
@@ -1709,6 +1742,13 @@ If a column name of an Oracle table needs to be quoted, use::
 $ +sqoop import ... --table customers --columns "\"\"first name\"\""+
 +
 This is the equivalent of: `select "first name" from customers`
+
+If multiple columns need to be quoted, use::
+$ +sqoop import ... --table customers --columns "\"\"first name\",\"last
+name\",\"region name\"\""+
++
+This is the equivalent of: `select "first name", "last name", "region name"
+from customers`
 
 Confirm The Data Connector for Oracle and Hadoop Can Initialize The Oracle Session
 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++

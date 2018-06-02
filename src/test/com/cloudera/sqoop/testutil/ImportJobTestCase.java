@@ -23,6 +23,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.apache.commons.lang.RandomStringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
@@ -35,6 +36,10 @@ import com.cloudera.sqoop.orm.CompilationManager;
 import com.cloudera.sqoop.tool.SqoopTool;
 import com.cloudera.sqoop.tool.ImportTool;
 import com.cloudera.sqoop.util.ClassLoaderStack;
+import org.junit.Before;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.fail;
 
 /**
  * Class that implements common methods required for tests which import data
@@ -44,6 +49,12 @@ public abstract class ImportJobTestCase extends BaseSqoopTestCase {
 
   public static final Log LOG = LogFactory.getLog(
       ImportJobTestCase.class.getName());
+
+  @Before
+  public void setUp() {
+    super.setUp();
+    removeTableDir();
+  }
 
   protected String getTablePrefix() {
     return "IMPORT_TABLE_";
@@ -94,7 +105,7 @@ public abstract class ImportJobTestCase extends BaseSqoopTestCase {
     args.add(getConnectString());
     args.add("--as-sequencefile");
     args.add("--num-mappers");
-    args.add("2");
+    args.add("1");
 
     args.addAll(getExtraArgs(conf));
 
@@ -206,8 +217,6 @@ public abstract class ImportJobTestCase extends BaseSqoopTestCase {
    * execution).
    */
   protected void runImport(SqoopTool tool, String [] argv) throws IOException {
-    removeTableDir();
-
     // run the tool through the normal entry-point.
     int ret;
     try {

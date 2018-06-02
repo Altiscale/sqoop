@@ -37,17 +37,15 @@ public final class OracleUtils {
   // Express edition hardcoded name.
   public static final String ORACLE_DATABASE_NAME = "xe";
 
-  public static final String CONNECT_STRING =
-      System.getProperty("sqoop.test.oracle.connectstring",
-      "jdbc:oracle:thin:@//localhost/" + ORACLE_DATABASE_NAME);
-  public static final String ORACLE_USER_NAME = "SQOOPTEST";
-  public static final String ORACLE_USER_PASS = "12345";
+  public static final String CONNECT_STRING = System.getProperty("sqoop.test.oracle.connectstring", "jdbc:oracle:thin:@//localhost/" + ORACLE_DATABASE_NAME);
+  public static final String ORACLE_USER_NAME = System.getProperty("sqoop.test.oracle.username", "SQOOPTEST");
+  public static final String ORACLE_USER_PASS = System.getProperty("sqoop.test.oracle.password", "12345");
 
   public static final String ORACLE_SECONDARY_USER_NAME = "SQOOPTEST2";
   public static final String ORACLE_SECONDARY_USER_PASS = "ABCDEF";
 
   public static final String ORACLE_INVALID_USER_NAME = "invalidusr";
-  public static final String SYSTEMTEST_TABLE_NAME = "oraoop_test";
+  public static final String SYSTEMTEST_TABLE_NAME = "ORAOOP_TEST";
   public static final int SYSTEMTEST_NUM_ROWS = 100;
   public static final int INTEGRATIONTEST_NUM_ROWS = 10000;
   // Number of mappers if wanting to override default setting

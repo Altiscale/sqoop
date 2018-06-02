@@ -26,7 +26,6 @@ import org.apache.commons.cli.OptionBuilder;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 
-import com.cloudera.sqoop.Sqoop;
 import com.cloudera.sqoop.SqoopOptions;
 import com.cloudera.sqoop.SqoopOptions.InvalidOptionsException;
 import com.cloudera.sqoop.SqoopOptions.UpdateMode;
@@ -99,20 +98,13 @@ public class ExportTool extends com.cloudera.sqoop.tool.BaseSqoopTool {
     try {
       exportTable(options, options.getTableName());
     } catch (IOException ioe) {
-      LOG.error("Encountered IOException running export job: "
-          + ioe.toString());
-      if (System.getProperty(Sqoop.SQOOP_RETHROW_PROPERTY) != null) {
-        throw new RuntimeException(ioe);
-      } else {
-        return 1;
-      }
+      LOG.error("Encountered IOException running export job: ", ioe);
+      rethrowIfRequired(options, ioe);
+      return 1;
     } catch (ExportException ee) {
-      LOG.error("Error during export: " + ee.toString());
-      if (System.getProperty(Sqoop.SQOOP_RETHROW_PROPERTY) != null) {
-        throw new RuntimeException(ee);
-      } else {
-        return 1;
-      }
+      LOG.error("Error during export: ", ee);
+      rethrowIfRequired(options, ee);
+      return 1;
     } finally {
       destroy(options);
     }
@@ -387,8 +379,14 @@ public class ExportTool extends com.cloudera.sqoop.tool.BaseSqoopTool {
     validateCommonOptions(options);
     validateCodeGenOptions(options);
     validateHCatalogOptions(options);
+    vaildateDirectExportOptions(options);
   }
 
+  void vaildateDirectExportOptions(SqoopOptions options) throws InvalidOptionsException {
+    if (options.isDirect()) {
+      validateHasDirectConnectorOption(options);
+    }
+  }
   private void applyNewUpdateOptions(CommandLine in, SqoopOptions out)
       throws InvalidOptionsException {
     if (in.hasOption(UPDATE_MODE_ARG)) {

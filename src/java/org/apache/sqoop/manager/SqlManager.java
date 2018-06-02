@@ -113,7 +113,26 @@ public abstract class SqlManager
   /** {@inheritDoc} */
   public String[] getColumnNames(String tableName) {
     String stmt = getColNamesQuery(tableName);
-    return getColumnNamesForRawQuery(stmt);
+    return filterSpecifiedColumnNames(getColumnNamesForRawQuery(stmt));
+  }
+
+  /**
+  * Utilize the --columns option, if specified.
+  * @param columns
+  * @return the subset of columns which were specified by --columns option.
+  */
+  protected String[] filterSpecifiedColumnNames(String[] columns) {
+    if (options.getColumns() == null) {
+      return columns;
+    }
+    List<String> colNames = new ArrayList<String>();
+    for (String col : columns) {
+      String userColName = options.getColumnNameCaseInsensitive(col);
+      if (userColName != null) {
+        colNames.add(userColName);
+      }
+    }
+    return colNames.toArray(new String[colNames.size()]);
   }
 
   @Override
@@ -150,6 +169,7 @@ public abstract class SqlManager
           }
         }
         columns.add(colName);
+        LOG.debug("Found column " + colName);
       }
       return columns.toArray(new String[0]);
     } catch (SQLException sqlException) {
@@ -275,7 +295,7 @@ public abstract class SqlManager
     }
 
     try {
-      Map<String, List<Integer>> colInfo = 
+      Map<String, List<Integer>> colInfo =
           new SqlTypeMap<String, List<Integer>>();
 
       int cols = results.getMetaData().getColumnCount();
@@ -300,6 +320,7 @@ public abstract class SqlManager
         info.add(precision);
         info.add(scale);
         colInfo.put(colName, info);
+        LOG.debug("Found column " + colName + " of type " + info);
       }
 
       return colInfo;
@@ -358,6 +379,7 @@ public abstract class SqlManager
         }
 
         colTypeNames.put(colName, colTypeName);
+        LOG.debug("Found column " + colName + " of type " + colTypeName);
       }
 
       return colTypeNames;
@@ -615,10 +637,15 @@ public abstract class SqlManager
     // correctly.
     String splitCol = getSplitColumn(opts, tableName);
     if (null == splitCol && opts.getNumMappers() > 1) {
-      // Can't infer a primary key.
-      throw new ImportException("No primary key could be found for table "
+      if (!opts.getAutoResetToOneMapper()) {
+        // Can't infer a primary key.
+        throw new ImportException("No primary key could be found for table "
           + tableName + ". Please specify one with --split-by or perform "
           + "a sequential import with '-m 1'.");
+      } else {
+        LOG.warn("Split by column not provided or can't be inferred.  Resetting to one mapper");
+        opts.setNumMappers(1);
+      }
     }
   }
 
@@ -891,7 +918,7 @@ public abstract class SqlManager
    * (queries executed by the ConnManager itself).
    */
   protected int getMetadataIsolationLevel() {
-    return Connection.TRANSACTION_READ_COMMITTED;
+    return options.getMetadataTransactionIsolationLevel();
   }
 
   /**

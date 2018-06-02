@@ -18,9 +18,13 @@
 
 package org.apache.sqoop.mapreduce;
 
-import java.io.IOException;
-import java.sql.SQLException;
-
+import com.cloudera.sqoop.SqoopOptions;
+import com.cloudera.sqoop.config.ConfigurationHelper;
+import com.cloudera.sqoop.io.CodecMap;
+import com.cloudera.sqoop.manager.ImportJobContext;
+import com.cloudera.sqoop.mapreduce.JobBase;
+import com.cloudera.sqoop.orm.TableClassName;
+import com.cloudera.sqoop.util.ImportException;
 import org.apache.avro.file.DataFileConstants;
 import org.apache.avro.mapred.AvroJob;
 import org.apache.commons.logging.Log;
@@ -39,14 +43,12 @@ import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
 import org.apache.hadoop.mapreduce.lib.output.SequenceFileOutputFormat;
 import org.apache.sqoop.mapreduce.hcat.SqoopHCatUtilities;
 import org.apache.sqoop.util.PerfCounters;
-import com.cloudera.sqoop.SqoopOptions;
-import com.cloudera.sqoop.config.ConfigurationHelper;
-import com.cloudera.sqoop.io.CodecMap;
-import com.cloudera.sqoop.manager.ImportJobContext;
-import com.cloudera.sqoop.mapreduce.JobBase;
-import com.cloudera.sqoop.orm.TableClassName;
-import com.cloudera.sqoop.util.ImportException;
-import org.apache.sqoop.validation.*;
+import org.apache.sqoop.validation.ValidationContext;
+import org.apache.sqoop.validation.ValidationException;
+
+import java.io.IOException;
+import java.sql.SQLException;
+import java.util.Date;
 
 /**
  * Base class for running an import MapReduce job.
@@ -55,7 +57,8 @@ import org.apache.sqoop.validation.*;
 public class ImportJobBase extends JobBase {
 
   private ImportJobContext context;
-
+  private long startTime;
+  public static final String OPERATION = "import";
   public static final Log LOG = LogFactory.getLog(
       ImportJobBase.class.getName());
 
@@ -82,6 +85,7 @@ public class ImportJobBase extends JobBase {
       final ImportJobContext context) {
     super(opts, mapperClass, inputFormatClass, outputFormatClass);
     this.context = context;
+    this.startTime = new Date().getTime();
   }
 
   /**
@@ -145,10 +149,8 @@ public class ImportJobBase extends JobBase {
         if (codecName != null) {
           Configuration conf = job.getConfiguration();
           String shortName = CodecMap.getCodecShortNameByName(codecName, conf);
-          if (!shortName.equalsIgnoreCase("default") &&
-              !shortName.equalsIgnoreCase("snappy")) {
-            // TODO: SQOOP-1391 More compression codec support
-            LOG.warn("Will use snappy as compression codec instead");
+          if (!shortName.equalsIgnoreCase("default")) {
+            conf.set(ParquetJob.CONF_OUTPUT_CODEC, shortName);
           }
         }
       }
@@ -223,7 +225,16 @@ public class ImportJobBase extends JobBase {
         + context.getConnManager().getClass().getName()
         + ". Please remove the parameter --direct");
     }
-
+    if (options.getAccumuloTable() != null && options.isDirect()
+        && !getContext().getConnManager().isDirectModeAccumuloSupported()) {
+      throw new IOException("Direct mode is incompatible with "
+            + "Accumulo. Please remove the parameter --direct");
+    }
+    if (options.getHBaseTable() != null && options.isDirect()
+        && !getContext().getConnManager().isDirectModeHBaseSupported()) {
+      throw new IOException("Direct mode is incompatible with "
+            + "HBase. Please remove the parameter --direct");
+    }
     if (null != tableName) {
       LOG.info("Beginning import of " + tableName);
     } else {
@@ -266,6 +277,13 @@ public class ImportJobBase extends JobBase {
       if (options.isValidationEnabled()) {
         validateImport(tableName, conf, job);
       }
+
+      if (options.doHiveImport() || isHCatJob) {
+        // Publish data for import job, only hive/hcat import jobs are supported now.
+        LOG.info("Publishing Hive/Hcat import job data to Listeners for table " + tableName);
+        PublishJobData.publishJobData(conf, options, OPERATION, tableName, startTime);
+      }
+
     } catch (InterruptedException ie) {
       throw new IOException(ie);
     } catch (ClassNotFoundException cnfe) {

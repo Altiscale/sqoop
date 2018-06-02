@@ -51,7 +51,7 @@ public class AvroImportMapper
       throws IOException, InterruptedException {
     Configuration conf = context.getConfiguration();
     schema = AvroJob.getMapOutputSchema(conf);
-    lobLoader = new LargeObjectLoader(conf);
+    lobLoader = new LargeObjectLoader(conf, FileOutputFormat.getWorkOutputPath(context));
     bigDecimalFormatString = conf.getBoolean(
         ImportJobBase.PROPERTY_BIGDECIMAL_FORMAT,
         ImportJobBase.PROPERTY_BIGDECIMAL_FORMAT_DEFAULT);
@@ -68,8 +68,7 @@ public class AvroImportMapper
       throw new IOException(sqlE);
     }
 
-    GenericRecord outKey = AvroUtil.toGenericRecord(val.getFieldMap(),
-        schema, bigDecimalFormatString);
+    GenericRecord outKey = AvroUtil.toGenericRecord(val.getFieldMap(), schema, bigDecimalFormatString);
     wrapper.datum(outKey);
     context.write(wrapper, NullWritable.get());
   }

@@ -29,6 +29,8 @@ import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.IOUtils;
+import org.junit.After;
+import org.junit.Test;
 
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
@@ -41,6 +43,8 @@ import java.io.Writer;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
+
+import static org.junit.Assert.assertEquals;
 
 /**
  * Test free form query import with the Oracle db.
@@ -75,7 +79,7 @@ public class OracleIncrementalImportTest extends ImportJobTestCase {
   /** the names of the tables we're creating. */
   private List<String> tableNames;
 
-  @Override
+  @After
   public void tearDown() {
     // Clean up the database on our way out.
     for (String tableName : tableNames) {
@@ -108,6 +112,8 @@ public class OracleIncrementalImportTest extends ImportJobTestCase {
     args.add(getWarehouseDir());
     args.add("--num-mappers");
     args.add("1");
+    args.add("--split-by");
+    args.add(checkColumnName);
     args.add("--table");
     args.add(tableName);
     args.add("--incremental");
@@ -126,6 +132,7 @@ public class OracleIncrementalImportTest extends ImportJobTestCase {
    * Create a tables with a date column.  Run incremental import on the table
    * with date column as check-column.
    */
+  @Test
   public void testIncrementalImportWithLastModified() throws IOException {
     tableNames = new ArrayList<String>();
     String [] types = { "INT", "VARCHAR(10)", "DATE", };
@@ -150,6 +157,34 @@ public class OracleIncrementalImportTest extends ImportJobTestCase {
     Path filePath = new Path(warehousePath, "part-m-00000");
     String output = readLineFromPath(filePath);
     String expectedVal = "2,new_data,2000-11-11";
+    assertEquals("Incremental import result expected a different string",
+                 expectedVal, output);
+  }
+
+  @Test
+  public void testIncrementalImportWithLastModifiedTimestamp() throws IOException {
+    tableNames = new ArrayList<String>();
+    String [] types = { "INT", "VARCHAR(10)", "TIMESTAMP", };
+    String [] vals = {
+        "1", "'old_data'",
+        "TO_TIMESTAMP('1999-01-01 11:11:11', 'YYYY-MM-DD HH24:MI:SS')",
+        "2", "'new_data'",
+        "TO_TIMESTAMP('2000-11-11 23:23:23', 'YYYY-MM-DD HH24:MI:SS')", };
+    String tableName = getTableName();
+    tableNames.add(tableName);
+    createTableWithColTypes(types, vals);
+    // Some version of Oracle's jdbc drivers automatically convert date to
+    // timestamp. Since we don't want this to happen for this test,
+    // we must explicitly use a property file to control this behavior.
+    String connPropsFileName = "connection.properties";
+    createFileWithContent(connPropsFileName, "oracle.jdbc.mapDateToTimestamp=false");
+    String[] args = getArgv(tableName, connPropsFileName, getColName(2));
+    runImport(args);
+
+    Path warehousePath = new Path(this.getWarehouseDir());
+    Path filePath = new Path(warehousePath, "part-m-00000");
+    String output = readLineFromPath(filePath);
+    String expectedVal = "2,new_data,2000-11-11 23:23:23.0";
     assertEquals("Incremental import result expected a different string",
                  expectedVal, output);
   }

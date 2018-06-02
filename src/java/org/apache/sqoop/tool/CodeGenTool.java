@@ -28,7 +28,6 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.util.StringUtils;
 
-import com.cloudera.sqoop.Sqoop;
 import com.cloudera.sqoop.SqoopOptions;
 import com.cloudera.sqoop.SqoopOptions.InvalidOptionsException;
 import com.cloudera.sqoop.cli.RelatedOptions;
@@ -90,6 +89,17 @@ public class CodeGenTool extends com.cloudera.sqoop.tool.BaseSqoopTool {
       return null;
     }
     LOG.info("Beginning code generation");
+
+    if (tableName != null && options.getFileLayout() == SqoopOptions.FileLayout.ParquetFile) {
+      String className = options.getClassName() != null ?
+          options.getClassName() : tableName;
+      if (className.equalsIgnoreCase(tableName)) {
+        className = "codegen_" + className;
+        options.setClassName(className);
+        LOG.info("Will generate java class as " + options.getClassName());
+      }
+    }
+
     CompilationManager compileMgr = new CompilationManager(options);
     ClassWriter classWriter = new ClassWriter(options, manager, tableName,
         compileMgr);
@@ -129,11 +139,8 @@ public class CodeGenTool extends com.cloudera.sqoop.tool.BaseSqoopTool {
     } catch (IOException ioe) {
       LOG.error("Encountered IOException running codegen job: "
           + StringUtils.stringifyException(ioe));
-      if (System.getProperty(Sqoop.SQOOP_RETHROW_PROPERTY) != null) {
-        throw new RuntimeException(ioe);
-      } else {
-        return 1;
-      }
+      rethrowIfRequired(options, ioe);
+      return 1;
     } finally {
       destroy(options);
     }

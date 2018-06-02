@@ -40,6 +40,8 @@ import org.apache.sqoop.manager.oracle.OraOopOutputFormatUpdate.UpdateMode;
 import org.apache.sqoop.manager.oracle.OraOopUtilities.
            JdbcOracleThinConnectionParsingError;
 
+import static org.apache.sqoop.mapreduce.JobBase.HADOOP_MAP_TASK_MAX_ATTEMTPS;
+
 /**
  * OraOop manager - if OraOop cannot be used it should fall back to the default
  * OracleManager.
@@ -122,6 +124,25 @@ public class OraOopManagerFactory extends ManagerFactory {
                     result = oraOopConnManager; // <- OraOop accepts
                                                 // responsibility for this Sqoop
                                                 // job!
+                  } else {
+                    OraOopConstants.OraOopOracleDataChunkMethod method =
+                        OraOopUtilities.getOraOopOracleDataChunkMethod(
+                            sqoopOptions.getConf());
+                    if (method == OraOopConstants.
+                                      OraOopOracleDataChunkMethod.PARTITION) {
+                      result = oraOopConnManager;
+                    } else {
+                      LOG.info(String.format("%s will not process this Sqoop"
+                         + " connection, as the Oracle table %s is an"
+                         + " index-organized table. If the table is"
+                         + " partitioned, set "
+                         + OraOopConstants.ORAOOP_ORACLE_DATA_CHUNK_METHOD
+                         + " to "
+                         + OraOopConstants.OraOopOracleDataChunkMethod.PARTITION
+                         + ".",
+                         OraOopConstants.ORAOOP_PRODUCT_NAME,
+                         oraOopConnManager.getOracleTableContext().toString()));
+                    }
                   }
                 }
               } catch (SQLException ex) {
@@ -685,11 +706,6 @@ public class OraOopManagerFactory extends ManagerFactory {
       result =
           OraOopOracleQueries.isTableAnIndexOrganizedTable(connection,
               tableContext);
-      if (result) {
-        LOG.info(String.format("%s will not process this Sqoop connection, "
-            + "as the Oracle table %s is an index-organized table.",
-            OraOopConstants.ORAOOP_PRODUCT_NAME, tableContext.toString()));
-      }
       return result;
     } catch (SQLException ex) {
       LOG.warn(String.format(
@@ -767,8 +783,7 @@ public class OraOopManagerFactory extends ManagerFactory {
   private void showUserTheOracleCommandToKillOraOop(SqoopOptions sqoopOptions) {
 
     int taskAttempts =
-        sqoopOptions.getConf().getInt(
-            OraOopConstants.Sqoop.MAX_MAPREDUCE_ATTEMPTS, -1);
+        sqoopOptions.getConf().getInt(HADOOP_MAP_TASK_MAX_ATTEMTPS, -1);
 
     // If killing the Oracle session if futile - because the job will be
     // reattempted, then don't

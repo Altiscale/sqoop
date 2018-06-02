@@ -40,6 +40,9 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hive.conf.HiveConf;
+import org.apache.hadoop.hive.metastore.HiveMetaStoreClient;
+import org.apache.hadoop.hive.ql.metadata.Table;
 import org.apache.hadoop.hive.shims.HadoopShims;
 import org.apache.hadoop.hive.shims.HadoopShims.HCatHadoopShims;
 import org.apache.hadoop.hive.shims.ShimLoader;
@@ -56,6 +59,7 @@ import org.apache.hadoop.mapreduce.OutputFormat;
 import org.apache.hadoop.util.Shell;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.hive.hcatalog.common.HCatConstants;
+import org.apache.hive.hcatalog.common.HCatUtil;
 import org.apache.hive.hcatalog.data.DefaultHCatRecord;
 import org.apache.hive.hcatalog.data.schema.HCatFieldSchema;
 import org.apache.hive.hcatalog.data.schema.HCatSchema;
@@ -63,6 +67,7 @@ import org.apache.hive.hcatalog.mapreduce.HCatInputFormat;
 import org.apache.hive.hcatalog.mapreduce.HCatOutputFormat;
 import org.apache.hive.hcatalog.mapreduce.OutputJobInfo;
 import org.apache.sqoop.config.ConfigurationConstants;
+import org.apache.sqoop.config.ConfigurationHelper;
 import org.apache.sqoop.hive.HiveTypes;
 import org.apache.sqoop.manager.ConnManager;
 import org.apache.sqoop.util.Executor;
@@ -156,6 +161,43 @@ public final class SqoopHCatUtilities {
 
   private static boolean testMode = false;
 
+  public static boolean isHCatView(final SqoopOptions opts)  {
+
+    String hCatDatabaseName = getHCatDbNameFromOptions(opts);
+
+    String hCatTableName = getHCatTableNameFromOptions(opts);
+
+    Configuration conf = opts.getConf();
+    HiveConf hiveConf;
+    try {
+      if (conf != null) {
+        hiveConf = HCatUtil.getHiveConf(conf);
+      } else {
+        hiveConf = new HiveConf(HCatInputFormat.class);
+      }
+      HiveMetaStoreClient client = HCatUtil.getHiveClient(hiveConf);
+      Table table = HCatUtil.getTable(client, hCatDatabaseName, hCatTableName);
+      return table.isView();
+    }
+    catch(Exception e){
+      LOG.warn("We were not able to determine if "+hCatDatabaseName+ ":"+hCatTableName+ "is view or table.");
+      LOG.info("isHCatView threw an exception:", e);
+      return false;
+    }
+  }
+
+  private static String getHCatTableNameFromOptions(SqoopOptions opts) {
+    String optHCTabName = opts.getHCatTableName();
+    return optHCTabName.toLowerCase();
+  }
+
+  private static String getHCatDbNameFromOptions(SqoopOptions opts) {
+    String hCatDatabaseName = opts.getHCatDatabaseName() != null ? opts
+        .getHCatDatabaseName() : DEFHCATDB;
+    hCatDatabaseName = hCatDatabaseName.toLowerCase();
+    return hCatDatabaseName;
+  }
+
   static class IntArrayWritable extends ArrayWritable {
     public IntArrayWritable() {
       super(IntWritable.class);
@@ -179,6 +221,13 @@ public final class SqoopHCatUtilities {
     public V get(Object key) {
       return super.get(((String) key).toLowerCase());
     }
+
+    @Override
+    public void putAll(Map<? extends String, ? extends V> map) {
+      for(Map.Entry<? extends String, ? extends V> entry: map.entrySet()) {
+        put(entry.getKey(), entry.getValue());
+      }
+    }
   }
 
   /**
@@ -197,6 +246,13 @@ public final class SqoopHCatUtilities {
     @Override
     public V get(Object key) {
       return super.get(((String) key).toUpperCase());
+    }
+
+    @Override
+    public void putAll(Map<? extends String, ? extends V> map) {
+      for(Map.Entry<? extends String, ? extends V> entry: map.entrySet()) {
+        put(entry.getKey(), entry.getValue());
+      }
     }
   }
 
@@ -262,12 +318,10 @@ public final class SqoopHCatUtilities {
     dbTableName = dbTable;
     configuration = config;
     hCatJob = job;
-    hCatDatabaseName = options.getHCatDatabaseName() != null ? options
-      .getHCatDatabaseName() : DEFHCATDB;
-    hCatDatabaseName = hCatDatabaseName.toLowerCase();
+    hCatDatabaseName = getHCatDbNameFromOptions(opts);
 
     String optHCTabName = options.getHCatTableName();
-    hCatTableName = optHCTabName.toLowerCase();
+    hCatTableName = getHCatTableNameFromOptions(opts);
 
     if (!hCatTableName.equals(optHCTabName)) {
       LOG.warn("Provided HCatalog table name " + optHCTabName
@@ -288,11 +342,18 @@ public final class SqoopHCatUtilities {
     hCatStaticPartitionValues = new ArrayList<String>();
     String partKeysString = options.getHCatalogPartitionKeys();
     String partKeysVals = options.getHCatalogPartitionValues();
+    // Already validated
     if (partKeysString != null) {
       String[] keys = partKeysString.split(",");
-      hCatStaticPartitionKeys.addAll(Arrays.asList(keys));
+      for (int i = 0; i < keys.length; ++i) {
+        String k = keys[i].trim();
+        hCatStaticPartitionKeys.add(k);
+      }
       String[] vals = partKeysVals.split(",");
-      hCatStaticPartitionValues.addAll(Arrays.asList(vals));
+      for (int i = 0; i < vals.length; ++i) {
+        String v = vals[i].trim();
+        hCatStaticPartitionValues.add(v);
+      }
     } else {
       partKeysString = options.getHivePartitionKey();
       if (partKeysString != null) {
@@ -315,7 +376,11 @@ public final class SqoopHCatUtilities {
     if (options.doCreateHCatalogTable()) {
       LOG.info("Creating HCatalog table " + hCatQualifiedTableName
         + " for import");
-      createHCatTable();
+      createHCatTable(false);
+    } else if (options.doDropAndCreateHCatalogTable()) {
+      LOG.info("Dropping and Creating HCatalog table "
+        + hCatQualifiedTableName + " for import");
+      createHCatTable(true);
     }
     // For serializing the schema to conf
     HCatInputFormat hif = HCatInputFormat.setInput(hCatJob, hCatDatabaseName,
@@ -365,13 +430,26 @@ public final class SqoopHCatUtilities {
 
     List<HCatFieldSchema> outputFieldList = new ArrayList<HCatFieldSchema>();
     for (String col : dbColumnNames) {
-      HCatFieldSchema hfs = hCatFullTableSchema.get(col);
-      if (hfs == null) {
-        throw new IOException("Database column " + col + " not found in "
-          + " hcatalog table.");
+      try {
+        HCatFieldSchema hfs = hCatFullTableSchema.get(col);
+        if (hfs == null) {
+          throw new IOException("Database column " + col + " not found in "
+              + " hcatalog table.");
+        }
+      } catch (Exception e) {
+        throw new IOException("Caught Exception checking database column " + col + " in "
+            + " hcatalog table.", e);
       }
-      if (hCatStaticPartitionKeys != null
-        && hCatStaticPartitionKeys.equals(col)) {
+      boolean skip=false;
+      if (hCatStaticPartitionKeys != null) {
+        for (String key : hCatStaticPartitionKeys) {
+          if (col.equals(key)) {
+            skip=true;
+            break;
+          }
+        }
+      }
+      if (skip) {
         continue;
       }
       outputFieldList.add(hCatFullTableSchema.get(col));
@@ -452,6 +530,20 @@ public final class SqoopHCatUtilities {
       } else {
         colNames = connManager.getColumnNamesForQuery(options.getSqlQuery());
       }
+    } else {
+      String[] fixedColNames = new String[colNames.length];
+      for (int i = 0; i < colNames.length; ++i) {
+        String userColName = colNames[i];
+
+        // Remove surrounding quotes if any
+        int len = userColName.length();
+        if (len > 2 && userColName.charAt(0) == '"' &&  userColName.charAt(len -1) == '"') {
+          userColName = userColName.substring(1, len -1);
+        }
+
+        fixedColNames[i] = userColName;
+      }
+      colNames = fixedColNames;
     }
 
     dbColumnNames = new String[colNames.length];
@@ -506,8 +598,13 @@ public final class SqoopHCatUtilities {
     return sb;
   }
 
-  private void createHCatTable() throws IOException {
+  private void createHCatTable(boolean dropIfExists) throws IOException {
     StringBuilder sb = new StringBuilder();
+    if (dropIfExists) {
+      sb.append("drop table ").
+              append(escHCatObj(hCatDatabaseName)).append('.').
+              append(escHCatObj(hCatTableName)).append(";\n");
+    }
     sb.append("create table ").
       append(escHCatObj(hCatDatabaseName)).append('.');
     sb.append(escHCatObj(hCatTableName)).append(" (\n\t");
@@ -670,7 +767,7 @@ public final class SqoopHCatUtilities {
     }
 
     IntWritable[] positions = new IntWritable[hCatFieldPositions.length];
-    for (int i : hCatFieldPositions) {
+    for (int i = 0; i < hCatFieldPositions.length; ++i) {
       positions[i] = new IntWritable(hCatFieldPositions[i]);
     }
 
@@ -828,7 +925,7 @@ public final class SqoopHCatUtilities {
    */
   public static void addJars(Job job, SqoopOptions options) throws IOException {
 
-    if (isLocalJobTracker(job)) {
+    if (ConfigurationHelper.isLocalJobTracker(job.getConfiguration())) {
       LOG.info("Not adding hcatalog jars to distributed cache in local mode");
       return;
     }
@@ -1004,23 +1101,9 @@ public final class SqoopHCatUtilities {
    }
  }
 
-  public static boolean isLocalJobTracker(Job job) {
-    Configuration conf = job.getConfiguration();
-    // If framework is set to YARN, then we can't be running in local mode
-    if ("yarn".equalsIgnoreCase(conf
-      .get(ConfigurationConstants.PROP_MAPREDUCE_FRAMEWORK_NAME))) {
-      return false;
-    }
-    String jtAddr = conf
-      .get(ConfigurationConstants.PROP_MAPRED_JOB_TRACKER_ADDRESS);
-    String jtAddr2 = conf
-      .get(ConfigurationConstants.PROP_MAPREDUCE_JOB_TRACKER_ADDRESS);
-    return (jtAddr != null && jtAddr.equals("local"))
-      || (jtAddr2 != null && jtAddr2.equals("local"));
-  }
 
   public void invokeOutputCommitterForLocalMode(Job job) throws IOException {
-    if (isLocalJobTracker(job) && isHadoop1()) {
+    if (ConfigurationHelper.isLocalJobTracker(job.getConfiguration()) && isHadoop1()) {
       // HCatalog 0.11- do have special class HCatHadoopShims, however this
       // class got merged into Hive Shim layer in 0.12+. Following method will
       // try to find correct implementation via reflection.

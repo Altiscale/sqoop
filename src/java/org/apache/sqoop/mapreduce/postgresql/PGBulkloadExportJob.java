@@ -32,7 +32,6 @@ import org.apache.hadoop.mapreduce.Job;
 import org.apache.hadoop.mapreduce.Mapper;
 import org.apache.hadoop.mapreduce.Reducer;
 import org.apache.hadoop.mapreduce.OutputFormat;
-import org.apache.sqoop.config.ConfigurationHelper;
 import org.apache.sqoop.lib.DelimiterSet;
 import org.apache.sqoop.manager.ConnManager;
 import org.apache.sqoop.mapreduce.ExportJobBase;
@@ -137,11 +136,8 @@ public class PGBulkloadExportJob extends ExportJobBase {
     conf.set("mapred.jar", context.getJarFile());
     conf.setBoolean("mapred.map.tasks.speculative.execution", false);
     conf.setBoolean("mapred.reduce.tasks.speculative.execution", false);
-    conf.setInt("mapred.map.max.attempts", 1);
-    conf.setInt("mapred.reduce.max.attempts", 1);
-    if (context.getOptions().doClearStagingTable()) {
-      conf.setBoolean("pgbulkload.clear.staging.table", true);
-    }
+    conf.setInt(HADOOP_MAP_TASK_MAX_ATTEMTPS, 1);
+    conf.setInt(HADOOP_REDUCE_TASK_MAX_ATTEMTPS, 1);
   }
 
 

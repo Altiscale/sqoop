@@ -288,11 +288,21 @@ public final class OraOopOracleQueries {
               + ") ";
     }
 
-    sql +=
-        "  ) pl, " + "  dba_segments s "
-            + "WHERE s.owner       =pl.table_owner "
-            + "AND s.segment_name  =pl.table_name "
-            + "AND s.partition_name=pl.partition_name ";
+    sql += "  ) pl, dba_tables t, dba_segments s "
+        + "WHERE t.owner=pl.table_owner "
+        + "AND t.table_name=pl.table_name "
+        + "AND ( "
+        + "     (t.iot_type='IOT' AND (s.owner,s.segment_name)= "
+        + "                          (SELECT c.index_owner,c.index_name "
+        + "                             FROM dba_constraints c "
+        + "                            WHERE c.owner=pl.table_owner "
+        + "                              AND c.table_name=pl.table_name "
+        + "                              AND c.constraint_type='P')) "
+        + "     OR (t.iot_type IS NULL "
+        + "         AND s.owner=t.owner "
+        + "         AND s.segment_name=t.table_name) "
+        + "    ) "
+        + "AND s.partition_name=pl.partition_name";
 
     PreparedStatement statement = connection.prepareStatement(sql);
     OraOopOracleQueries.setStringAtName(statement, "table_owner", table
@@ -314,7 +324,7 @@ public final class OraOopOracleQueries {
       OraOopOracleDataChunkPartition dataChunk =
           new OraOopOracleDataChunkPartition(resultSet
               .getString("partition_name"), resultSet
-              .getBoolean("is_subpartition"), resultSet.getInt("blocks"));
+              .getBoolean("is_subpartition"), resultSet.getLong("blocks"));
       result.add(dataChunk);
     }
     resultSet.close();
@@ -407,8 +417,8 @@ public final class OraOopOracleQueries {
       OraOopOracleDataChunkExtent dataChunk =
           new OraOopOracleDataChunkExtent(dataChunkId, resultSet
               .getInt("data_object_id"), resultSet.getInt("relative_fno"),
-              resultSet.getInt("start_block_id"), resultSet
-                  .getInt("end_block_id"));
+              resultSet.getLong("start_block_id"), resultSet
+                  .getLong("end_block_id"));
       result.add(dataChunk);
     }
 
@@ -594,9 +604,9 @@ public final class OraOopOracleQueries {
   }
 
   public static List<String> getTableColumnNames(Connection connection,
-      OracleTable table) throws SQLException {
+      OracleTable table, boolean escapingDisabled) throws SQLException {
 
-    OracleTableColumns oracleTableColumns = getTableColumns(connection, table);
+    OracleTableColumns oracleTableColumns = getTableColumns(connection, table, escapingDisabled);
     List<String> result = new ArrayList<String>(oracleTableColumns.size());
 
     for (int idx = 0; idx < oracleTableColumns.size(); idx++) {
@@ -609,11 +619,11 @@ public final class OraOopOracleQueries {
   public static List<String> getTableColumnNames(Connection connection,
       OracleTable table, boolean omitLobAndLongColumnsDuringImport,
       OraOopConstants.Sqoop.Tool sqoopTool, boolean onlyOraOopSupportedTypes,
-      boolean omitOraOopPseudoColumns) throws SQLException {
+      boolean omitOraOopPseudoColumns, boolean escapingDisabled) throws SQLException {
 
     OracleTableColumns oracleTableColumns =
         getTableColumns(connection, table, omitLobAndLongColumnsDuringImport,
-            sqoopTool, onlyOraOopSupportedTypes, omitOraOopPseudoColumns);
+            sqoopTool, onlyOraOopSupportedTypes, omitOraOopPseudoColumns, escapingDisabled);
 
     List<String> result = new ArrayList<String>(oracleTableColumns.size());
 
@@ -626,7 +636,7 @@ public final class OraOopOracleQueries {
 
   private static OracleTableColumns getTableColumns(Connection connection,
       OracleTable table, boolean omitLobColumns, String dataTypesClause,
-      HashSet<String> columnNamesToOmit) throws SQLException {
+      HashSet<String> columnNamesToOmit, boolean escapingDisabled) throws SQLException {
 
     String sql =
         "SELECT column_name, data_type " + " FROM dba_tab_columns"
@@ -670,7 +680,7 @@ public final class OraOopOracleQueries {
       if (idx > 0) {
         columnList.append(",");
       }
-      columnList.append(result.get(idx).getName());
+      columnList.append(OracleUtils.escapeIdentifier(result.get(idx).getName(), escapingDisabled));
     }
     sql =
         String.format("SELECT %s FROM %s WHERE 0=1", columnList.toString(),
@@ -690,16 +700,16 @@ public final class OraOopOracleQueries {
   }
 
   public static OracleTableColumns getTableColumns(Connection connection,
-      OracleTable table) throws SQLException {
+      OracleTable table, boolean escapingDisabled) throws SQLException {
 
     return getTableColumns(connection, table, false, null // <- dataTypesClause
-        , null); // <-columnNamesToOmit
+        , null, escapingDisabled); // <-columnNamesToOmit
   }
 
   public static OracleTableColumns getTableColumns(Connection connection,
       OracleTable table, boolean omitLobAndLongColumnsDuringImport,
       OraOopConstants.Sqoop.Tool sqoopTool, boolean onlyOraOopSupportedTypes,
-      boolean omitOraOopPseudoColumns) throws SQLException {
+      boolean omitOraOopPseudoColumns, boolean escapingDisabled) throws SQLException {
 
     String dataTypesClause = "";
     HashSet<String> columnNamesToOmit = null;
@@ -755,7 +765,7 @@ public final class OraOopOracleQueries {
     }
 
     return getTableColumns(connection, table,
-        omitLobAndLongColumnsDuringImport, dataTypesClause, columnNamesToOmit);
+        omitLobAndLongColumnsDuringImport, dataTypesClause, columnNamesToOmit, escapingDisabled);
   }
 
   public static List<OracleActiveInstance> getOracleActiveInstances(
@@ -959,7 +969,7 @@ public final class OraOopOracleQueries {
 
     Statement statement = connection.createStatement();
     String sql =
-        String.format("ALTER TABLE %s EXCHANGE SUBPARTITION %s WITH TABLE %s",
+        String.format("ALTER TABLE %s EXCHANGE SUBPARTITION %s WITH TABLE %s WITHOUT VALIDATION",
             table.toString(), subPartitionName, subPartitionTable.toString());
     statement.execute(sql);
     statement.close();
@@ -1166,12 +1176,12 @@ public final class OraOopOracleQueries {
       if (insertClause.length() > 0) {
         insertClause.append(",");
       }
-      insertClause.append(String.format("target.%s", columnName));
+      insertClause.append(String.format("target.\"%s\"", columnName));
 
       if (valuesClause.length() > 0) {
         valuesClause.append(",");
       }
-      valuesClause.append(String.format("source.%s", columnName));
+      valuesClause.append(String.format("source.\"%s\"", columnName));
 
       if (!OraOopUtilities.stringArrayContains(mergeColumnNames, columnName,
           true)) {
@@ -1189,7 +1199,7 @@ public final class OraOopOracleQueries {
           if (updateClause.length() > 0) {
             updateClause.append(",");
           }
-          updateClause.append(String.format("target.%1$s = source.%1$s",
+          updateClause.append(String.format("target.\"%1$s\" = source.\"%1$s\"",
               columnName));
 
         }
@@ -1222,7 +1232,7 @@ public final class OraOopOracleQueries {
   public static void updateTable(Connection connection,
       OracleTable targetTable, OracleTable sourceTable,
       String[] mergeColumnNames, OracleTableColumns oracleTableColumns,
-      Object oraOopSysDate, int oraOopMapperId, boolean parallelizationEnabled)
+      Object oraOopSysDate, int oraOopMapperId, boolean parallelizationEnabled, boolean escapingDisabled)
       throws SQLException {
 
     StringBuilder targetColumnsClause = new StringBuilder();
@@ -1234,12 +1244,13 @@ public final class OraOopOracleQueries {
       if (targetColumnsClause.length() > 0) {
         targetColumnsClause.append(",");
       }
-      targetColumnsClause.append(String.format("a.%s", columnName));
+      targetColumnsClause
+          .append(String.format("a.%s", OracleUtils.escapeIdentifier(columnName, escapingDisabled)));
 
       if (sourceColumnsClause.length() > 0) {
         sourceColumnsClause.append(",");
       }
-      sourceColumnsClause.append(String.format("b.%s", columnName));
+      sourceColumnsClause.append(String.format("b.%s", OracleUtils.escapeIdentifier(columnName, escapingDisabled)));
     }
 
     String sourceClause = sourceColumnsClause.toString();
@@ -1288,7 +1299,7 @@ public final class OraOopOracleQueries {
       OracleTable tableToCreate, String tableToCreateStorageClause,
       OracleTable tableContainingUpdates, OracleTable tableToBeUpdated,
       String[] joinColumnNames, CreateExportChangesTableOptions options,
-      boolean parallelizationEnabled) throws SQLException {
+      boolean parallelizationEnabled, boolean escapingDisabled) throws SQLException {
 
     List<String> columnNames =
         getTableColumnNames(connection, tableToBeUpdated
@@ -1296,6 +1307,7 @@ public final class OraOopOracleQueries {
             , OraOopConstants.Sqoop.Tool.EXPORT
             , true // <- onlyOraOopSupportedTypes
             , false // <- omitOraOopPseudoColumns
+            , escapingDisabled
         );
 
     StringBuilder columnClause = new StringBuilder(2 * columnNames.size());
@@ -1303,7 +1315,7 @@ public final class OraOopOracleQueries {
       if (idx > 0) {
         columnClause.append(",");
       }
-      columnClause.append("a." + columnNames.get(idx));
+      columnClause.append(String.format("a.%s", OracleUtils.escapeIdentifier(columnNames.get(idx), escapingDisabled)));
     }
 
     StringBuilder rowEqualityClause = new StringBuilder();
@@ -1329,9 +1341,9 @@ public final class OraOopOracleQueries {
         rowEqualityClause.append("OR");
       }
 
-      rowEqualityClause.append(String.format("(a.%1$s <> b.%1$s "
-          + "OR (a.%1$s IS NULL AND b.%1$s IS NOT NULL) "
-          + "OR (a.%1$s IS NOT NULL AND b.%1$s IS NULL))", columnName));
+      rowEqualityClause.append(String.format("(a.\"%1$s\" <> b.\"%1$s\" "
+          + "OR (a.\"%1$s\" IS NULL AND b.\"%1$s\" IS NOT NULL) "
+          + "OR (a.\"%1$s\" IS NOT NULL AND b.\"%1$s\" IS NULL))", columnName));
     }
 
     String sqlJoin = null;
@@ -1422,10 +1434,10 @@ public final class OraOopOracleQueries {
   public static void insertRowsIntoExportTable(Connection connection,
       OracleTable tableToInsertRowsInto,
       OracleTable tableContainingRowsToInsert, Object oraOopSysDate,
-      int oraOopMapperId, boolean parallelizationEnabled) throws SQLException {
+      int oraOopMapperId, boolean parallelizationEnabled, boolean escapingDisabled) throws SQLException {
 
     List<String> columnNames =
-        getTableColumnNames(connection, tableToInsertRowsInto);
+        getTableColumnNames(connection, tableToInsertRowsInto, escapingDisabled);
 
     StringBuilder columnClause =
         new StringBuilder(2 + (2 * columnNames.size()));
@@ -1433,7 +1445,7 @@ public final class OraOopOracleQueries {
       if (idx > 0) {
         columnClause.append(",");
       }
-      columnClause.append(columnNames.get(idx));
+        columnClause.append(columnNames.get(idx));
     }
 
     String columnsClause = columnClause.toString();

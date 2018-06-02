@@ -20,7 +20,10 @@ package org.apache.sqoop;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.UnsupportedEncodingException;
 import java.lang.reflect.Field;
+import java.net.URLDecoder;
+import java.sql.Connection;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Iterator;
@@ -31,8 +34,12 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.sqoop.accumulo.AccumuloConstants;
+import org.apache.sqoop.mapreduce.mainframe.MainframeConfiguration;
+import org.apache.sqoop.tool.BaseSqoopTool;
 import org.apache.sqoop.util.CredentialsUtil;
 import org.apache.sqoop.util.LoggingUtils;
+import org.apache.sqoop.util.SqoopJsonUtil;
+import org.apache.sqoop.util.password.CredentialProviderHelper;
 import org.apache.sqoop.validation.AbortOnFailureHandler;
 import org.apache.sqoop.validation.AbsoluteValidationThreshold;
 import org.apache.sqoop.validation.RowCountValidator;
@@ -46,10 +53,17 @@ import com.cloudera.sqoop.tool.SqoopTool;
 import com.cloudera.sqoop.util.RandomHash;
 import com.cloudera.sqoop.util.StoredAsProperty;
 
+import static org.apache.sqoop.Sqoop.SQOOP_RETHROW_PROPERTY;
+import static org.apache.sqoop.orm.ClassWriter.toJavaIdentifier;
+
 /**
  * Configurable state used by Sqoop tools.
  */
 public class SqoopOptions implements Cloneable {
+
+  public static final String ORACLE_ESCAPING_DISABLED = "sqoop.oracle.escaping.disabled";
+
+  private static final String OLD_SQOOP_TEST_IMPORT_ROOT_DIR = "sqoop.test.import.rootDir";
 
   public static final Log LOG = LogFactory.getLog(SqoopOptions.class.getName());
 
@@ -66,7 +80,6 @@ public class SqoopOptions implements Cloneable {
   public static final String DEF_HCAT_HOME_OLD = "/usr/lib/hcatalog";
 
   public static final boolean METASTORE_PASSWORD_DEFAULT = false;
-
   /**
    * Thrown when invalid cmdline options are given.
    */
@@ -88,6 +101,9 @@ public class SqoopOptions implements Cloneable {
     }
   }
 
+  @StoredAsProperty("customtool.options.jsonmap")
+  private Map<String, String> customToolOptions;
+
   // TODO(aaron): Adding something here? Add a setter and a getter.  Add a
   // default value in initDefaults() if you need one.  If this value needs to
   // be serialized in the metastore, it should be marked with
@@ -98,6 +114,12 @@ public class SqoopOptions implements Cloneable {
   // are stored as constants in BaseSqoopTool.
 
   @StoredAsProperty("verbose") private boolean verbose;
+
+  @StoredAsProperty("temporary.dirRoot") private String tempRootDir;
+
+  // If this property is set, always throw an exception during a job, do not just
+  // exit with status 1.
+  @StoredAsProperty("sqoop.throwOnError") private boolean throwOnError;
 
   @StoredAsProperty("mapreduce.job.name") private String mapreduceJobName;
 
@@ -119,6 +141,7 @@ public class SqoopOptions implements Cloneable {
   // This represents path to a file on ${user.home} containing the password
   // with 400 permissions so its only readable by user executing the tool
   @StoredAsProperty("db.password.file") private String passwordFilePath;
+  @StoredAsProperty("db.password.alias") private String passwordAlias;
 
   @StoredAsProperty("null.string") private String nullStringValue;
   @StoredAsProperty("input.null.string") private String inNullStringValue;
@@ -134,6 +157,7 @@ public class SqoopOptions implements Cloneable {
   @StoredAsProperty("codegen.auto.compile.dir") private boolean jarDirIsAuto;
   private String hadoopMapRedHome; // not serialized to metastore.
   @StoredAsProperty("db.split.column") private String splitByCol;
+  @StoredAsProperty("split.limit") private Integer splitLimit;
   @StoredAsProperty("db.where.clause") private String whereClause;
   @StoredAsProperty("db.query") private String sqlQuery;
   @StoredAsProperty("db.query.boundary") private String boundaryQuery;
@@ -151,6 +175,7 @@ public class SqoopOptions implements Cloneable {
   @StoredAsProperty("hive.overwrite.table") private boolean overwriteHiveTable;
   @StoredAsProperty("hive.fail.table.exists")
   private boolean failIfHiveTableExists;
+  @StoredAsProperty("hive.external.table.dir") private String hiveExternalTableDir;
   @StoredAsProperty("hive.table.name") private String hiveTableName;
   @StoredAsProperty("hive.database.name") private String hiveDatabaseName;
   @StoredAsProperty("hive.drop.delims") private boolean hiveDropDelims;
@@ -164,9 +189,12 @@ public class SqoopOptions implements Cloneable {
   private String hCatDatabaseName;
   @StoredAsProperty("hcatalog.create.table")
   private boolean hCatCreateTable;
+  @StoredAsProperty("hcatalog.drop.and.create.table")
+  private boolean hCatDropAndCreateTable;
   @StoredAsProperty("hcatalog.storage.stanza")
   private String hCatStorageStanza;
   private String hCatHome; // not serialized to metastore.
+  @StoredAsProperty("skip.dist.cache")
   private boolean skipDistCache;
   @StoredAsProperty("hcatalog.partition.keys")
     private String hCatalogPartitionKeys;
@@ -175,6 +203,9 @@ public class SqoopOptions implements Cloneable {
   // User explicit mapping of types
   private Properties mapColumnJava; // stored as map.colum.java
   private Properties mapColumnHive; // stored as map.column.hive
+  // SQOOP-3123 default enabled
+  private boolean escapeColumnMappingEnabled;
+  private Properties mapReplacedColumnJava; // used to replace special characters in columns
 
   // An ordered list of column names denoting what order columns are
   // serialized to a PreparedStatement from a generated record type.
@@ -222,6 +253,7 @@ public class SqoopOptions implements Cloneable {
   private boolean areInputDelimsManuallySet;
 
   private Configuration conf;
+  private String toolName;
 
   public static final int DEFAULT_NUM_MAPPERS = 4;
 
@@ -265,6 +297,14 @@ public class SqoopOptions implements Cloneable {
   // Dataset name for mainframe import tool
   @StoredAsProperty("mainframe.input.dataset.name")
   private String mainframeInputDatasetName;
+
+  // Dataset type for mainframe import tool
+  @StoredAsProperty("mainframe.input.dataset.type")
+  private String mainframeInputDatasetType;
+
+  // Indicates if the data set is on tape to use different FTP parser
+  @StoredAsProperty("mainframe.input.dataset.tape")
+  private String mainframeInputDatasetTape;
 
   // Accumulo home directory
   private String accumuloHome; // not serialized to metastore.
@@ -310,6 +350,12 @@ public class SqoopOptions implements Cloneable {
   // Relaxed Isolation
   @StoredAsProperty("relaxed.isolation") private boolean relaxedIsolation;
 
+  // Use single mapper for non-primary key tables without
+  // explicit split by cols
+  @StoredAsProperty("reset.onemapper") private boolean autoResetToOneMapper;
+
+  @StoredAsProperty("sqlconnection.metadata.transaction.isolation.level") private int metadataTransactionIsolationLevel;
+
   // These next two fields are not serialized to the metastore.
   // If this SqoopOptions is created by reading a saved job, these will
   // be populated by the JobStorage to facilitate updating the same
@@ -341,6 +387,9 @@ public class SqoopOptions implements Cloneable {
   private Class validatorClass; // Class for the validator implementation.
   private Class validationThresholdClass; // ValidationThreshold implementation
   private Class validationFailureHandlerClass; // FailureHandler implementation
+
+  @StoredAsProperty(ORACLE_ESCAPING_DISABLED)
+  private boolean oracleEscapingDisabled;
 
   public SqoopOptions() {
     initDefaults(null);
@@ -604,6 +653,9 @@ public class SqoopOptions implements Cloneable {
           } else if (typ.isEnum()) {
             f.set(this, Enum.valueOf(typ,
                 props.getProperty(propName, f.get(this).toString())));
+          }  else if (typ.equals(Map.class)) {
+            f.set(this,
+                SqoopJsonUtil.getMapforJsonString(props.getProperty(propName)));
           } else {
             throw new RuntimeException("Could not retrieve property "
                 + propName + " for type: " + typ);
@@ -659,6 +711,10 @@ public class SqoopOptions implements Cloneable {
     if (this.verbose) {
       LoggingUtils.setDebugLevel();
     }
+
+    // Ensuring that oracleEscapingDisabled property is propagated to
+    // the level of Hadoop configuration as well
+    this.setOracleEscapingDisabled(this.isOracleEscapingDisabled());
   }
 
   private void loadPasswordProperty(Properties props) {
@@ -669,6 +725,16 @@ public class SqoopOptions implements Cloneable {
         return; // short-circuit
       } catch (IOException e) {
         throw new RuntimeException("Unable to fetch password from file.", e);
+      }
+    }
+
+    passwordAlias = props.getProperty("db.password.alias");
+    if (passwordAlias != null) {
+      try {
+        setPassword(CredentialProviderHelper.resolveAlias(getConf(), passwordAlias));
+        return; // short-circuit
+      } catch (IOException e) {
+        throw new RuntimeException("Unable to resolve credentials.", e);
       }
     }
 
@@ -712,6 +778,11 @@ public class SqoopOptions implements Cloneable {
                 f.get(this) == null ? "null" : f.get(this).toString());
           } else if (typ.isEnum()) {
             putProperty(props, propName, f.get(this).toString());
+          } else if (typ.equals(Map.class)) {
+            putProperty(
+                props,
+                propName,
+                SqoopJsonUtil.getJsonStringforMap((Map) f.get(this)));
           } else {
             throw new RuntimeException("Could not set property "
                 + propName + " for type: " + typ);
@@ -745,6 +816,11 @@ public class SqoopOptions implements Cloneable {
   private void writePasswordProperty(Properties props) {
     if (getPasswordFilePath() != null) { // short-circuit
       putProperty(props, "db.password.file", getPasswordFilePath());
+      return;
+    }
+
+    if (getPasswordAlias() != null) { // short-circuit
+      putProperty(props, "db.password.alias", getPasswordAlias());
       return;
     }
 
@@ -801,6 +877,10 @@ public class SqoopOptions implements Cloneable {
 
       if (null != mapColumnJava) {
         other.mapColumnJava = (Properties) this.mapColumnJava.clone();
+      }
+
+      if (null != mapReplacedColumnJava) {
+        other.mapReplacedColumnJava = (Properties) this.mapReplacedColumnJava.clone();
       }
 
       return other;
@@ -968,6 +1048,17 @@ public class SqoopOptions implements Cloneable {
 
     // We do not want to be verbose too much if not explicitly needed
     this.verbose = false;
+    //This name of the system property is intentionally OLD_SQOOP_TEST_IMPORT_ROOT_DIR
+    //to support backward compatibility. Do not exchange it with
+    //org.apache.sqoop.tool.BaseSqoopTool#TEMP_ROOTDIR_ARG
+    this.tempRootDir = System.getProperty(OLD_SQOOP_TEST_IMPORT_ROOT_DIR, "_sqoop");
+
+    //This default value is set intentionally according to SQOOP_RETHROW_PROPERTY system property
+    //to support backward compatibility. Do not exchange it.
+    this.throwOnError = isSqoopRethrowSystemPropertySet();
+
+    setOracleEscapingDisabled(Boolean.parseBoolean(System.getProperty(ORACLE_ESCAPING_DISABLED, "true")));
+
     this.isValidationEnabled = false; // validation is disabled by default
     this.validatorClass = RowCountValidator.class;
     this.validationThresholdClass = AbsoluteValidationThreshold.class;
@@ -976,6 +1067,24 @@ public class SqoopOptions implements Cloneable {
     // Relaxed isolation will not enabled by default which is the behavior
     // of sqoop until now.
     this.relaxedIsolation = false;
+
+    // set default mainframe data set type to partitioned data set
+    this.mainframeInputDatasetType = MainframeConfiguration.MAINFRAME_INPUT_DATASET_TYPE_PARTITIONED;
+
+    // set default metadata transaction isolation level to TRANSACTION_READ_COMMITTED
+    this.metadataTransactionIsolationLevel = Connection.TRANSACTION_READ_COMMITTED;
+
+    // set escape column mapping to true
+    this.escapeColumnMappingEnabled = true;
+  }
+
+  /**
+   * The SQOOP_RETHROW_PROPERTY system property is considered to be set if it is set to
+   * any kind of String value, i.e. it is not null.
+   */
+  // Type of SQOOP_RETHROW_PROPERTY is String only to provide backward compatibility.
+  public static boolean isSqoopRethrowSystemPropertySet() {
+    return (System.getProperty(SQOOP_RETHROW_PROPERTY) != null);
   }
 
   /**
@@ -1071,6 +1180,22 @@ public class SqoopOptions implements Cloneable {
     this.verbose = beVerbose;
   }
 
+  public String getTempRootDir() {
+    return tempRootDir;
+  }
+
+  public void setTempRootDir(String tempRootDir) {
+    this.tempRootDir = tempRootDir;
+  }
+
+  public boolean isThrowOnError() {
+    return throwOnError;
+  }
+
+  public void setThrowOnError(boolean throwOnError) {
+    this.throwOnError = throwOnError;
+  }
+
   /**
    * Get the temporary directory; guaranteed to end in File.separator
    * (e.g., '/').
@@ -1139,6 +1264,17 @@ public class SqoopOptions implements Cloneable {
     }
   }
 
+  public String getColumnNameCaseInsensitive(String col){
+    if (null != columns) {
+      for(String columnName : columns) {
+        if(columnName.equalsIgnoreCase(col)) {
+          return columnName;
+        }
+      }
+    }
+    return null;
+  }
+
   public void setColumns(String [] cols) {
     if (null == cols) {
       this.columns = null;
@@ -1153,6 +1289,14 @@ public class SqoopOptions implements Cloneable {
 
   public void setSplitByCol(String splitBy) {
     this.splitByCol = splitBy;
+  }
+
+  public Integer getSplitLimit() {
+    return splitLimit;
+  }
+
+  public void setSplitLimit(Integer splitLimit) {
+    this.splitLimit = splitLimit;
   }
 
   public String getWhereClause() {
@@ -1183,13 +1327,36 @@ public class SqoopOptions implements Cloneable {
     this.passwordFilePath = passwdFilePath;
   }
 
+  public String getPasswordAlias() {
+    return passwordAlias;
+  }
+
+  public void setPasswordAlias(String alias) {
+    this.passwordAlias = alias;
+  }
+
   protected void parseColumnMapping(String mapping,
           Properties output) {
     output.clear();
-    String[] maps = mapping.split(",");
+
+    // replace (xx,xx) with (xx#xx), so that we can just split by "," afterwards
+    String[] maps = mapping.replaceAll("\\(([0-9]+),([0-9]+)\\)", "($1#$2)").split(",");
+
     for(String map : maps) {
       String[] details = map.split("=");
-      output.put(details[0], details[1]);
+      if (details.length != 2) {
+        throw new IllegalArgumentException("Malformed mapping.  "
+            + "Column mapping should be the form key=value[,key=value]*");
+      }
+
+      try {
+        output.put(
+            URLDecoder.decode(details[0].replaceAll("\\(([0-9]+)#([0-9]+)\\)", "($1,$2)"), "UTF-8"),
+            URLDecoder.decode(details[1].replaceAll("\\(([0-9]+)#([0-9]+)\\)", "($1,$2)"), "UTF-8"));
+      } catch (UnsupportedEncodingException e) {
+        throw new IllegalArgumentException("Encoding not supported. "
+            + "Column mapping should be UTF-8 encoding.");
+      }
     }
   }
 
@@ -1321,6 +1488,14 @@ public class SqoopOptions implements Cloneable {
     this.hiveImport = doImport;
   }
 
+  public String getHiveExternalTableDir() {
+    return this.hiveExternalTableDir;
+  }
+
+  public void setHiveExternalTableDir(String location) {
+    this.hiveExternalTableDir = location;
+  }
+
   /**
    * @return the user-specified option to overwrite existing table in hive.
    */
@@ -1399,6 +1574,14 @@ public class SqoopOptions implements Cloneable {
 
   public void setCreateHCatalogTable(boolean create) {
     this.hCatCreateTable = create;
+  }
+
+  public boolean doDropAndCreateHCatalogTable() {
+    return hCatDropAndCreateTable;
+  }
+
+  public void setDropAndCreateHCatalogTable(boolean dropAndCreate) {
+    this.hCatDropAndCreateTable = dropAndCreate;
   }
 
   public void setHCatStorageStanza(String stanza) {
@@ -2174,6 +2357,11 @@ public class SqoopOptions implements Cloneable {
   public void setMainframeInputDatasetName(String name) {
     mainframeInputDatasetName = name;
     tableName = name;
+    // may need to set this in the conf variable otherwise it gets lost.
+  }
+
+  public void setMainframeInputDatasetType(String name) {
+    mainframeInputDatasetType = name;
   }
 
   /**
@@ -2181,6 +2369,24 @@ public class SqoopOptions implements Cloneable {
    */
   public String getMainframeInputDatasetName() {
     return mainframeInputDatasetName;
+  }
+
+  /*
+   * Return the mainframe dataset type
+   */
+  public String getMainframeInputDatasetType() {
+    return mainframeInputDatasetType;
+  }
+
+  // return whether the dataset is on tape
+  public Boolean getMainframeInputDatasetTape() {
+	  if (mainframeInputDatasetTape == null) { return false; }
+	  return Boolean.parseBoolean(mainframeInputDatasetTape);
+  }
+
+  // sets whether the dataset is on tape
+  public void setMainframeInputDatasetTape(String txtIsFromTape) {
+	  mainframeInputDatasetTape = Boolean.valueOf(Boolean.parseBoolean(txtIsFromTape)).toString();
   }
 
   public static String getAccumuloHomeDefault() {
@@ -2488,9 +2694,18 @@ public class SqoopOptions implements Cloneable {
     return this.relaxedIsolation;
   }
 
+  public void setAutoResetToOneMapper(boolean b) {
+	 this.autoResetToOneMapper = b;
+  }
+
+  public boolean getAutoResetToOneMapper() {
+	return this.autoResetToOneMapper;
+  }
+
   public String getHCatalogPartitionKeys() {
     return hCatalogPartitionKeys;
   }
+
 
   public void setHCatalogPartitionKeys(String hpks) {
     this.hCatalogPartitionKeys = hpks;
@@ -2503,4 +2718,74 @@ public class SqoopOptions implements Cloneable {
   public void setHCatalogPartitionValues(String hpvs) {
     this.hCatalogPartitionValues = hpvs;
   }
+
+  public Map<String, String> getCustomToolOptions() {
+    return customToolOptions;
+  }
+
+  public void setCustomToolOptions(Map<String, String> customToolOptions) {
+    this.customToolOptions = customToolOptions;
+  }
+
+  public String getToolName() {
+    return this.toolName;
+  }
+
+  public void setToolName(String toolName) {
+    this.toolName = toolName;
+  }
+
+  public int getMetadataTransactionIsolationLevel() {
+    return this.metadataTransactionIsolationLevel;
+  }
+
+  public void setMetadataTransactionIsolationLevel(int transactionIsolationLevel) {
+    this.metadataTransactionIsolationLevel = transactionIsolationLevel;
+  }
+
+  public boolean isOracleEscapingDisabled() {
+    return oracleEscapingDisabled;
+  }
+
+  public void setOracleEscapingDisabled(boolean escapingDisabled) {
+    this.oracleEscapingDisabled = escapingDisabled;
+    // important to have custom setter to ensure option is available through
+    // Hadoop configuration on those places where SqoopOptions is not reachable
+    getConf().setBoolean(ORACLE_ESCAPING_DISABLED, escapingDisabled);
+  }
+
+  public void setEscapeMappingColumnNamesEnabled(boolean escapingEnabled) {
+    this.escapeColumnMappingEnabled = escapingEnabled;
+    // important to have custom setter to ensure option is available through
+    // Hadoop configuration on those places where SqoopOptions is not reachable
+    getConf().setBoolean(BaseSqoopTool.ESCAPE_MAPPING_COLUMN_NAMES_ENABLED, escapingEnabled);
+  }
+
+  public boolean getEscapeMappingColumnNamesEnabled() {
+    return escapeColumnMappingEnabled;
+  }
+
+  public Properties getColumnNames() {
+    if (escapeColumnMappingEnabled && null == mapReplacedColumnJava) {
+      return doCleanColumnMapping();
+    }
+    return escapeColumnMappingEnabled ? mapReplacedColumnJava : mapColumnJava;
+  }
+
+  private Properties doCleanColumnMapping() {
+      mapReplacedColumnJava = new Properties();
+
+      if (!mapColumnJava.isEmpty()) {
+        for (Map.Entry<Object, Object> entry : mapColumnJava.entrySet()) {
+          String candidate = toJavaIdentifier((String)entry.getKey());
+          mapReplacedColumnJava.put(candidate, mapColumnJava.getProperty((String)entry.getKey()));
+        }
+        return mapReplacedColumnJava;
+      }
+
+      return mapColumnJava;
+    }
+
+
 }
+

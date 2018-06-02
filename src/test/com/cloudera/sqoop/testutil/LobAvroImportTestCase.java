@@ -18,7 +18,9 @@
 
 package com.cloudera.sqoop.testutil;
 
+import org.junit.After;
 import org.junit.FixMethodOrder;
+import org.junit.Test;
 import org.junit.runners.MethodSorters;
 import java.io.IOException;
 import java.io.InputStream;
@@ -38,6 +40,10 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.sqoop.io.CodecMap;
 import org.apache.sqoop.lib.BlobRef;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
 
 /**
  * Tests BLOB/CLOB import for Avro.
@@ -72,7 +78,7 @@ public abstract class LobAvroImportTestCase extends ImportJobTestCase {
     return false;
   }
 
-  @Override
+  @After
   public void tearDown() {
     try {
       // Clean up the database on our way out.
@@ -109,7 +115,7 @@ public abstract class LobAvroImportTestCase extends ImportJobTestCase {
     args.add(getConnectString());
     args.add("--as-avrodatafile");
     args.add("--num-mappers");
-    args.add("2");
+    args.add("1");
 
     for (String arg : additionalArgs) {
       args.add(arg);
@@ -158,6 +164,7 @@ public abstract class LobAvroImportTestCase extends ImportJobTestCase {
    * @throws IOException
    * @throws SQLException
    */
+  @Test
   public void testBlobAvroImportInline() throws IOException, SQLException {
     String [] types = { getBlobType() };
     String expectedVal = "This is short BLOB data";
@@ -185,6 +192,7 @@ public abstract class LobAvroImportTestCase extends ImportJobTestCase {
    * @throws IOException
    * @throws SQLException
    */
+  @Test
   public void testBlobAvroImportExternal() throws IOException, SQLException {
     String [] types = { getBlobType() };
     String data = "This is short BLOB data";
@@ -207,8 +215,9 @@ public abstract class LobAvroImportTestCase extends ImportJobTestCase {
     String expectedEnd = getTableNum() + "_m_0000000.lob,68,"
       + data.length() + ")";
 
-    assertTrue(returnVal.startsWith(expectedStart));
-    assertTrue(returnVal.endsWith(expectedEnd));
+    assertNotNull(returnVal);
+    assertTrue("ExpectedStart: " + expectedStart + ", value: " + returnVal, returnVal.startsWith(expectedStart));
+    assertTrue("ExpectedEnd: " + expectedEnd + ", value: " + returnVal, returnVal.endsWith(expectedEnd));
 
     // Verify that blob data stored in the external lob file is correct.
     BlobRef br = BlobRef.parse(returnVal);
@@ -233,6 +242,7 @@ public abstract class LobAvroImportTestCase extends ImportJobTestCase {
    * @throws IOException
    * @throws SQLException
    */
+  @Test
   public void testBlobCompressedAvroImportInline()
       throws IOException, SQLException {
     String [] types = { getBlobType() };
@@ -266,6 +276,7 @@ public abstract class LobAvroImportTestCase extends ImportJobTestCase {
    * @throws IOException
    * @throws SQLException
    */
+  @Test
   public void testBlobCompressedAvroImportExternal()
       throws IOException, SQLException {
     String [] types = { getBlobType() };
@@ -295,8 +306,9 @@ public abstract class LobAvroImportTestCase extends ImportJobTestCase {
     String expectedEnd = getTableNum() + "_m_0000000.lob,68,"
       + data.length() + ")";
 
-    assertTrue(returnVal.startsWith(expectedStart));
-    assertTrue(returnVal.endsWith(expectedEnd));
+    assertNotNull(returnVal);
+    assertTrue("ExpectedStart: " + expectedStart + ", value: " + returnVal, returnVal.startsWith(expectedStart));
+    assertTrue("ExpectedEnd: " + expectedEnd + ", value: " + returnVal, returnVal.endsWith(expectedEnd));
 
     // Verify that blob data stored in the external lob file is correct.
     BlobRef br = BlobRef.parse(returnVal);
@@ -321,6 +333,7 @@ public abstract class LobAvroImportTestCase extends ImportJobTestCase {
    * @throws IOException
    * @throws SQLException
    */
+  @Test
   public void testBlobAvroImportMultiCols() throws IOException, SQLException {
     String [] types = { getBlobType(), getBlobType(), getBlobType(), };
     String expectedVal1 = "This is short BLOB data1";
@@ -355,24 +368,29 @@ public abstract class LobAvroImportTestCase extends ImportJobTestCase {
     assertEquals(getColName(2), expectedVal3, returnVal);
   }
 
+  @Test
   public void testClobAvroImportInline() throws IOException, SQLException {
     // TODO: add tests for CLOB support for Avro import
   }
 
+  @Test
   public void testClobAvroImportExternal() throws IOException, SQLException {
     // TODO: add tests for CLOB support for Avro import
   }
 
+  @Test
   public void testClobCompressedAvroImportInline()
       throws IOException, SQLException {
     // TODO: add tests for CLOB support for Avro import
   }
 
+  @Test
   public void testClobCompressedAvroImportExternal()
       throws IOException, SQLException {
     // TODO: add tests for CLOB support for Avro import
   }
 
+  @Test
   public void testClobAvroImportMultiCols() throws IOException, SQLException {
     // TODO: add tests for CLOB support for Avro import
   }

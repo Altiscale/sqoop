@@ -28,31 +28,32 @@ import java.sql.Types;
 import java.util.List;
 import java.util.Map;
 
-import com.cloudera.sqoop.mapreduce.MergeJob;
-import com.cloudera.sqoop.orm.TableClassName;
-import com.cloudera.sqoop.util.ClassLoaderStack;
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.OptionBuilder;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-
-import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.util.StringUtils;
+import org.apache.sqoop.avro.AvroSchemaMismatchException;
 
-import com.cloudera.sqoop.Sqoop;
 import com.cloudera.sqoop.SqoopOptions;
 import com.cloudera.sqoop.SqoopOptions.InvalidOptionsException;
 import com.cloudera.sqoop.cli.RelatedOptions;
 import com.cloudera.sqoop.cli.ToolOptions;
 import com.cloudera.sqoop.hive.HiveImport;
 import com.cloudera.sqoop.manager.ImportJobContext;
+import com.cloudera.sqoop.mapreduce.MergeJob;
 import com.cloudera.sqoop.metastore.JobData;
 import com.cloudera.sqoop.metastore.JobStorage;
 import com.cloudera.sqoop.metastore.JobStorageFactory;
+import com.cloudera.sqoop.orm.TableClassName;
 import com.cloudera.sqoop.util.AppendUtils;
+import com.cloudera.sqoop.util.ClassLoaderStack;
 import com.cloudera.sqoop.util.ImportException;
+
+import static org.apache.sqoop.manager.SupportedManagers.MYSQL;
 
 /**
  * Tool that performs database imports to HDFS.
@@ -60,6 +61,8 @@ import com.cloudera.sqoop.util.ImportException;
 public class ImportTool extends com.cloudera.sqoop.tool.BaseSqoopTool {
 
   public static final Log LOG = LogFactory.getLog(ImportTool.class.getName());
+
+  private static final String IMPORT_FAILED_ERROR_MSG = "Import failed: ";
 
   private CodeGenTool codeGenerator;
 
@@ -79,8 +82,12 @@ public class ImportTool extends com.cloudera.sqoop.tool.BaseSqoopTool {
   }
 
   public ImportTool(String toolName, boolean allTables) {
+    this(toolName, new CodeGenTool(), allTables);
+  }
+
+  public ImportTool(String toolName, CodeGenTool codeGenerator, boolean allTables) {
     super(toolName);
-    this.codeGenerator = new CodeGenTool();
+    this.codeGenerator = codeGenerator;
     this.allTables = allTables;
   }
 
@@ -200,12 +207,12 @@ public class ImportTool extends com.cloudera.sqoop.tool.BaseSqoopTool {
     String query;
 
     sb.append("SELECT MAX(");
-    sb.append(manager.escapeTableName(options.getIncrementalTestColumn()));
+    sb.append(manager.escapeColName(options.getIncrementalTestColumn()));
     sb.append(") FROM ");
 
     if (options.getTableName() != null) {
       // Table import
-      sb.append(options.getTableName());
+      sb.append(manager.escapeTableName(options.getTableName()));
 
       String where = options.getWhereClause();
       if (null != where) {
@@ -292,7 +299,6 @@ public class ImportTool extends com.cloudera.sqoop.tool.BaseSqoopTool {
       return true;
     }
 
-    FileSystem fs = FileSystem.get(options.getConf());
     SqoopOptions.IncrementalMode incrementalMode = options.getIncrementalMode();
     String nextIncrementalValue = null;
 
@@ -317,11 +323,14 @@ public class ImportTool extends com.cloudera.sqoop.tool.BaseSqoopTool {
       }
       break;
     case DateLastModified:
-      if (options.getMergeKeyCol() == null && !options.isAppendMode()
-          && fs.exists(getOutputPath(options, context.getTableName(), false))) {
-        throw new ImportException("--" + MERGE_KEY_ARG + " or " + "--" + APPEND_ARG
-          + " is required when using --" + this.INCREMENT_TYPE_ARG
-          + " lastmodified and the output directory exists.");
+      if (options.getMergeKeyCol() == null && !options.isAppendMode()) {
+        Path outputPath = getOutputPath(options, context.getTableName(), false);
+        FileSystem fs = outputPath.getFileSystem(options.getConf());
+        if (fs.exists(outputPath)) {
+          throw new ImportException("--" + MERGE_KEY_ARG + " or " + "--" + APPEND_ARG
+            + " is required when using --" + this.INCREMENT_TYPE_ARG
+            + " lastmodified and the output directory exists.");
+        }
       }
       checkColumnType = manager.getColumnTypes(options.getTableName(),
         options.getSqlQuery()).get(options.getIncrementalTestColumn());
@@ -428,9 +437,14 @@ public class ImportTool extends com.cloudera.sqoop.tool.BaseSqoopTool {
    * Merge HDFS output directories
    */
   protected void lastModifiedMerge(SqoopOptions options, ImportJobContext context) throws IOException {
-    FileSystem fs = FileSystem.get(options.getConf());
-    if (context.getDestination() != null && fs.exists(context.getDestination())) {
-      Path userDestDir = getOutputPath(options, context.getTableName(), false);
+    if (context.getDestination() == null) {
+      return;
+    }
+
+    Path userDestDir = getOutputPath(options, context.getTableName(), false);
+    FileSystem fs = userDestDir.getFileSystem(options.getConf());
+    if (fs.exists(context.getDestination())) {
+      LOG.info("Final destination exists, will run merge job.");
       if (fs.exists(userDestDir)) {
         String tableClassName = null;
         if (!context.getConnManager().isORMFacilitySelfManaged()) {
@@ -461,7 +475,16 @@ public class ImportTool extends com.cloudera.sqoop.tool.BaseSqoopTool {
 
         unloadJars();
       } else {
-        fs.rename(context.getDestination(), userDestDir);
+        // Create parent directory(ies), otherwise fs.rename would fail
+        if(!fs.exists(userDestDir.getParent())) {
+          fs.mkdirs(userDestDir.getParent());
+        }
+
+        // And finally move the data
+        LOG.info("Moving data from temporary directory " + context.getDestination() + " to final destination " + userDestDir);
+        if(!fs.rename(context.getDestination(), userDestDir)) {
+          throw new RuntimeException("Couldn't move data from temporary directory " + context.getDestination() + " to final destination " + userDestDir);
+        }
       }
     }
   }
@@ -523,8 +546,8 @@ public class ImportTool extends com.cloudera.sqoop.tool.BaseSqoopTool {
   private void deleteTargetDir(ImportJobContext context) throws IOException {
 
     SqoopOptions options = context.getOptions();
-    FileSystem fs = FileSystem.get(options.getConf());
     Path destDir = context.getDestination();
+    FileSystem fs = destDir.getFileSystem(options.getConf());
 
     if (fs.exists(destDir)) {
       fs.delete(destDir, true);
@@ -561,7 +584,7 @@ public class ImportTool extends com.cloudera.sqoop.tool.BaseSqoopTool {
       if(salt == null && options.getSqlQuery() != null) {
         salt = Integer.toHexString(options.getSqlQuery().hashCode());
       }
-      outputPath = AppendUtils.getTempAppendDir(salt);
+      outputPath = AppendUtils.getTempAppendDir(salt, options);
       LOG.debug("Using temporary folder: " + outputPath.getName());
     } else {
       // Try in this order: target-dir or warehouse-dir
@@ -604,26 +627,21 @@ public class ImportTool extends com.cloudera.sqoop.tool.BaseSqoopTool {
       // Import a single table (or query) the user specified.
       importTable(options, options.getTableName(), hiveImport);
     } catch (IllegalArgumentException iea) {
-        LOG.error("Imported Failed: " + iea.getMessage());
-        if (System.getProperty(Sqoop.SQOOP_RETHROW_PROPERTY) != null) {
-          throw iea;
-        }
-        return 1;
+        LOG.error(IMPORT_FAILED_ERROR_MSG + iea.getMessage());
+      rethrowIfRequired(options, iea);
+      return 1;
     } catch (IOException ioe) {
-      LOG.error("Encountered IOException running import job: "
-          + StringUtils.stringifyException(ioe));
-      if (System.getProperty(Sqoop.SQOOP_RETHROW_PROPERTY) != null) {
-        throw new RuntimeException(ioe);
-      } else {
-        return 1;
-      }
+      LOG.error(IMPORT_FAILED_ERROR_MSG + StringUtils.stringifyException(ioe));
+      rethrowIfRequired(options, ioe);
+      return 1;
     } catch (ImportException ie) {
-      LOG.error("Error during import: " + ie.toString());
-      if (System.getProperty(Sqoop.SQOOP_RETHROW_PROPERTY) != null) {
-        throw new RuntimeException(ie);
-      } else {
-        return 1;
-      }
+      LOG.error(IMPORT_FAILED_ERROR_MSG + ie.toString());
+      rethrowIfRequired(options, ie);
+      return 1;
+    } catch (AvroSchemaMismatchException e) {
+      LOG.error(IMPORT_FAILED_ERROR_MSG, e);
+      rethrowIfRequired(options, e);
+      return 1;
     } finally {
       destroy(options);
     }
@@ -660,6 +678,14 @@ public class ImportTool extends com.cloudera.sqoop.tool.BaseSqoopTool {
           .hasArg()
           .withDescription("Column of the table used to split work units")
           .withLongOpt(SPLIT_BY_ARG)
+          .create());
+      importOpts
+        .addOption(OptionBuilder
+          .withArgName("size")
+          .hasArg()
+          .withDescription(
+            "Upper Limit of rows per split for split columns of Date/Time/Timestamp and integer types. For date or timestamp fields it is calculated in seconds. split-limit should be greater than 0")
+          .withLongOpt(SPLIT_LIMIT_ARG)
           .create());
       importOpts.addOption(OptionBuilder.withArgName("where clause")
           .hasArg().withDescription("WHERE clause to use during import")
@@ -750,7 +776,10 @@ public class ImportTool extends com.cloudera.sqoop.tool.BaseSqoopTool {
         + "database when more rows are needed")
         .withLongOpt(FETCH_SIZE_ARG)
         .create());
-
+    importOpts.addOption(OptionBuilder.withArgName("reset-mappers")
+      .withDescription("Reset the number of mappers to one mapper if no split key available")
+      .withLongOpt(AUTORESET_TO_ONE_MAPPER)
+      .create());
     return importOpts;
   }
 
@@ -884,6 +913,10 @@ public class ImportTool extends com.cloudera.sqoop.tool.BaseSqoopTool {
           out.setSplitByCol(in.getOptionValue(SPLIT_BY_ARG));
         }
 
+        if (in.hasOption(SPLIT_LIMIT_ARG)) {
+            out.setSplitLimit(Integer.parseInt(in.getOptionValue(SPLIT_LIMIT_ARG)));
+        }
+
         if (in.hasOption(WHERE_ARG)) {
           out.setWhereClause(in.getOptionValue(WHERE_ARG));
         }
@@ -969,6 +1002,15 @@ public class ImportTool extends com.cloudera.sqoop.tool.BaseSqoopTool {
         out.setExistingJarName(in.getOptionValue(JAR_FILE_NAME_ARG));
       }
 
+      if (in.hasOption(AUTORESET_TO_ONE_MAPPER)) {
+        out.setAutoResetToOneMapper(true);
+      }
+
+      if (in.hasOption(ESCAPE_MAPPING_COLUMN_NAMES_ENABLED)) {
+        out.setEscapeMappingColumnNamesEnabled(Boolean.parseBoolean(in.getOptionValue(
+            ESCAPE_MAPPING_COLUMN_NAMES_ENABLED)));
+      }
+
       applyIncrementalOptions(in, out);
       applyHiveOptions(in, out);
       applyOutputFormatOptions(in, out);
@@ -989,86 +1031,103 @@ public class ImportTool extends com.cloudera.sqoop.tool.BaseSqoopTool {
    * @param options the configured SqoopOptions to check
    */
   protected void validateImportOptions(SqoopOptions options)
-      throws InvalidOptionsException {
-    if (!allTables && options.getTableName() == null
-        && options.getSqlQuery() == null) {
-      throw new InvalidOptionsException(
-          "--table or --" + SQL_QUERY_ARG + " is required for import. "
-          + "(Or use sqoop import-all-tables.)"
-          + HELP_STR);
-    } else if (options.getExistingJarName() != null
-        && options.getClassName() == null) {
-      throw new InvalidOptionsException("Jar specified with --jar-file, but no "
-          + "class specified with --class-name." + HELP_STR);
-    } else if (options.getTargetDir() != null
-        && options.getWarehouseDir() != null) {
-      throw new InvalidOptionsException(
-          "--target-dir with --warehouse-dir are incompatible options."
-          + HELP_STR);
-    } else if (options.getTableName() != null
-        && options.getSqlQuery() != null) {
-      throw new InvalidOptionsException(
-          "Cannot specify --" + SQL_QUERY_ARG + " and --table together."
-          + HELP_STR);
-    } else if (options.getSqlQuery() != null
-        && options.getTargetDir() == null
-        && options.getHBaseTable() == null
-        && options.getHCatTableName() == null
-        && options.getAccumuloTable() == null) {
-      throw new InvalidOptionsException(
-          "Must specify destination with --target-dir. "
-          + HELP_STR);
-    } else if (options.getSqlQuery() != null && options.doHiveImport()
-        && options.getHiveTableName() == null) {
-      throw new InvalidOptionsException(
-          "When importing a query to Hive, you must specify --"
-          + HIVE_TABLE_ARG + "." + HELP_STR);
-    } else if (options.getSqlQuery() != null && options.getNumMappers() > 1
-        && options.getSplitByCol() == null) {
-      throw new InvalidOptionsException(
-          "When importing query results in parallel, you must specify --"
-          + SPLIT_BY_ARG + "." + HELP_STR);
-    } else if (options.isDirect()
-            && options.getFileLayout() != SqoopOptions.FileLayout.TextFile
-            && options.getConnectString().contains("jdbc:mysql://")) {
-      throw new InvalidOptionsException(
-            "MySQL direct import currently supports only text output format. "
-             + "Parameters --as-sequencefile --as-avrodatafile and --as-parquetfile are not "
-             + "supported with --direct params in MySQL case.");
-    } else if (options.isDirect()
-            && options.doHiveDropDelims()) {
-      throw new InvalidOptionsException(
-            "Direct import currently do not support dropping hive delimiters,"
-            + " please remove parameter --hive-drop-import-delims.");
-    } else if (allTables && options.isValidationEnabled()) {
-      throw new InvalidOptionsException("Validation is not supported for "
-            + "all tables but single table only.");
-    } else if (options.getSqlQuery() != null && options.isValidationEnabled()) {
-      throw new InvalidOptionsException("Validation is not supported for "
-            + "free from query but single table only.");
-    } else if (options.getWhereClause() != null
-            && options.isValidationEnabled()) {
-      throw new InvalidOptionsException("Validation is not supported for "
-            + "where clause but single table only.");
-    } else if (options.getIncrementalMode()
-        != SqoopOptions.IncrementalMode.None && options.isValidationEnabled()) {
-      throw new InvalidOptionsException("Validation is not supported for "
-        + "incremental imports but single table only.");
-    } else if ((options.getTargetDir() != null
-      || options.getWarehouseDir() != null)
-      && options.getHCatTableName() != null) {
-      throw new InvalidOptionsException("--hcatalog-table cannot be used "
-        + " --warehouse-dir or --target-dir options");
-    } else if (options.isDeleteMode() && options.isAppendMode()) {
-       throw new InvalidOptionsException("--append and --delete-target-dir can"
-         + " not be used together.");
-    } else if (options.isDeleteMode() && options.getIncrementalMode()
-         != SqoopOptions.IncrementalMode.None) {
-       throw new InvalidOptionsException("--delete-target-dir can not be used"
-         + " with incremental imports.");
-    }
-  }
+	      throws InvalidOptionsException {
+	    if (!allTables && options.getTableName() == null
+	        && options.getSqlQuery() == null) {
+	      throw new InvalidOptionsException(
+	          "--table or --" + SQL_QUERY_ARG + " is required for import. "
+	              + "(Or use sqoop import-all-tables.)"
+	              + HELP_STR);
+	    } else if (options.getExistingJarName() != null
+	        && options.getClassName() == null) {
+	      throw new InvalidOptionsException("Jar specified with --jar-file, but no "
+	          + "class specified with --class-name." + HELP_STR);
+	    } else if (options.getTargetDir() != null
+	        && options.getWarehouseDir() != null) {
+	      throw new InvalidOptionsException(
+	          "--target-dir with --warehouse-dir are incompatible options."
+	              + HELP_STR);
+	    } else if (options.getTableName() != null
+	        && options.getSqlQuery() != null) {
+	      throw new InvalidOptionsException(
+	          "Cannot specify --" + SQL_QUERY_ARG + " and --table together."
+	              + HELP_STR);
+	    } else if (options.getSqlQuery() != null
+	        && options.getTargetDir() == null
+	        && options.getHBaseTable() == null
+	        && options.getHCatTableName() == null
+	        && options.getAccumuloTable() == null) {
+	      throw new InvalidOptionsException(
+	          "Must specify destination with --target-dir. "
+	              + HELP_STR);
+	    } else if (options.getSqlQuery() != null && options.doHiveImport()
+	        && options.getHiveTableName() == null) {
+	      throw new InvalidOptionsException(
+	          "When importing a query to Hive, you must specify --"
+	              + HIVE_TABLE_ARG + "." + HELP_STR);
+	    } else if (options.getSqlQuery() != null && options.getNumMappers() > 1
+	        && options.getSplitByCol() == null) {
+	      throw new InvalidOptionsException(
+	          "When importing query results in parallel, you must specify --"
+	              + SPLIT_BY_ARG + "." + HELP_STR);
+	    } else if (options.isDirect()) {
+	      validateDirectImportOptions(options);
+	    } else if (allTables && options.isValidationEnabled()) {
+	      throw new InvalidOptionsException("Validation is not supported for "
+	          + "all tables but single table only.");
+	    } else if (options.getSqlQuery() != null && options.isValidationEnabled()) {
+	      throw new InvalidOptionsException("Validation is not supported for "
+	          + "free from query but single table only.");
+	    } else if (options.getWhereClause() != null
+	        && options.isValidationEnabled()) {
+	      throw new InvalidOptionsException("Validation is not supported for "
+	          + "where clause but single table only.");
+	    } else if (options.getIncrementalMode()
+	        != SqoopOptions.IncrementalMode.None && options.isValidationEnabled()) {
+	      throw new InvalidOptionsException("Validation is not supported for "
+	          + "incremental imports but single table only.");
+	    } else if ((options.getTargetDir() != null
+	        || options.getWarehouseDir() != null)
+	        && options.getHCatTableName() != null) {
+	      throw new InvalidOptionsException("--hcatalog-table cannot be used "
+	          + " --warehouse-dir or --target-dir options");
+	    } else if (options.isDeleteMode() && options.isAppendMode()) {
+	      throw new InvalidOptionsException("--append and --delete-target-dir can"
+	          + " not be used together.");
+	    } else if (options.isDeleteMode() && options.getIncrementalMode()
+	        != SqoopOptions.IncrementalMode.None) {
+	      throw new InvalidOptionsException("--delete-target-dir can not be used"
+	          + " with incremental imports.");
+	    } else if (options.getAutoResetToOneMapper()
+	        && (options.getSplitByCol() != null)) {
+	      throw new InvalidOptionsException("--autoreset-to-one-mapper and"
+	          + " --split-by cannot be used together.");
+	    }
+	  }
 
+	  void validateDirectImportOptions(SqoopOptions options) throws InvalidOptionsException {
+	    validateDirectMysqlOptions(options);
+	    validateDirectDropHiveDelimOption(options);
+	    validateHasDirectConnectorOption(options);
+	  }
+
+	  void validateDirectDropHiveDelimOption(SqoopOptions options) throws InvalidOptionsException {
+	    if (options.doHiveDropDelims()) {
+	      throw new InvalidOptionsException(
+	          "Direct import currently do not support dropping hive delimiters,"
+	              + " please remove parameter --hive-drop-import-delims.");
+	    }
+	  }
+
+	  void validateDirectMysqlOptions(SqoopOptions options) throws InvalidOptionsException {
+	    if (options.getFileLayout() != SqoopOptions.FileLayout.TextFile
+	        && MYSQL.isTheManagerTypeOf(options)) {
+	      throw new InvalidOptionsException(
+	          "MySQL direct import currently supports only text output format. "
+	              + "Parameters --as-sequencefile --as-avrodatafile and --as-parquetfile are not "
+	              + "supported with --direct params in MySQL case.");
+	    }
+	  }
   /**
    * Validate the incremental import options.
    */

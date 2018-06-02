@@ -19,6 +19,7 @@
 package com.cloudera.sqoop;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.sql.Connection;
@@ -30,8 +31,6 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
-import junit.framework.TestCase;
-
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
@@ -39,7 +38,7 @@ import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.util.StringUtils;
-
+import org.apache.sqoop.hive.HiveImport;
 import com.cloudera.sqoop.manager.ConnManager;
 import com.cloudera.sqoop.manager.HsqldbManager;
 import com.cloudera.sqoop.manager.ManagerFactory;
@@ -49,6 +48,13 @@ import com.cloudera.sqoop.testutil.BaseSqoopTestCase;
 import com.cloudera.sqoop.testutil.CommonArgs;
 import com.cloudera.sqoop.tool.ImportTool;
 import com.cloudera.sqoop.tool.JobTool;
+import org.junit.Before;
+import org.junit.Rule;
+import org.junit.Test;
+import org.junit.rules.ExpectedException;
+
+
+import static org.junit.Assert.*;
 
 /**
  * Test the incremental import functionality.
@@ -57,7 +63,8 @@ import com.cloudera.sqoop.tool.JobTool;
  * The metastore URL is configured to be in-memory, and drop all
  * state between individual tests.
  */
-public class TestIncrementalImport extends TestCase {
+
+public class TestIncrementalImport  {
 
   public static final Log LOG = LogFactory.getLog(
       TestIncrementalImport.class.getName());
@@ -65,7 +72,10 @@ public class TestIncrementalImport extends TestCase {
   // What database do we read from.
   public static final String SOURCE_DB_URL = "jdbc:hsqldb:mem:incremental";
 
-  @Override
+  @Rule
+  public ExpectedException thrown = ExpectedException.none();
+
+  @Before
   public void setUp() throws Exception {
     // Delete db state between tests.
     TestSavedJobs.resetJobSchema();
@@ -93,7 +103,7 @@ public class TestIncrementalImport extends TestCase {
     PreparedStatement s = null;
     ResultSet rs = null;
     try {
-      s = c.prepareStatement("SELECT COUNT(*) FROM " + table);
+      s = c.prepareStatement("SELECT COUNT(*) FROM " + manager.escapeTableName(table));
       rs = s.executeQuery();
       if (!rs.next()) {
         fail("No resultset");
@@ -131,7 +141,7 @@ public class TestIncrementalImport extends TestCase {
     Connection c = manager.getConnection();
     PreparedStatement s = null;
     try {
-      s = c.prepareStatement("INSERT INTO " + tableName + " VALUES(?)");
+      s = c.prepareStatement("INSERT INTO " + manager.escapeTableName(tableName) + " VALUES(?)");
       for (int i = low; i < hi; i++) {
         s.setInt(1, i);
         s.executeUpdate();
@@ -139,7 +149,9 @@ public class TestIncrementalImport extends TestCase {
 
       c.commit();
     } finally {
-      s.close();
+      if(s != null) {
+        s.close();
+      }
     }
   }
 
@@ -156,7 +168,7 @@ public class TestIncrementalImport extends TestCase {
     Connection c = manager.getConnection();
     PreparedStatement s = null;
     try {
-      s = c.prepareStatement("INSERT INTO " + tableName + " VALUES(?,?)");
+      s = c.prepareStatement("INSERT INTO " + manager.escapeTableName(tableName) + " VALUES(?,?)");
       for (int i = low; i < hi; i++) {
         s.setInt(1, i);
         s.setTimestamp(2, ts);
@@ -182,7 +194,7 @@ public class TestIncrementalImport extends TestCase {
     Connection c = manager.getConnection();
     PreparedStatement s = null;
     try {
-      s = c.prepareStatement("INSERT INTO " + tableName + " VALUES(?)");
+      s = c.prepareStatement("INSERT INTO " + manager.escapeTableName(tableName) + " VALUES(?)");
       for (int i = low; i < hi; i++) {
         s.setString(1, Integer.toString(i));
         s.executeUpdate();
@@ -204,7 +216,7 @@ public class TestIncrementalImport extends TestCase {
     Connection c = manager.getConnection();
     PreparedStatement s = null;
     try {
-      s = c.prepareStatement("CREATE TABLE " + tableName + "(id INT NOT NULL)");
+      s = c.prepareStatement("CREATE TABLE " + manager.escapeTableName(tableName) + "(id INT NOT NULL)");
       s.executeUpdate();
       c.commit();
       insertIdRows(tableName, 0, insertRows);
@@ -225,7 +237,7 @@ public class TestIncrementalImport extends TestCase {
     Connection c = manager.getConnection();
     PreparedStatement s = null;
     try {
-      s = c.prepareStatement("CREATE TABLE " + tableName + "(id INT NOT NULL, "
+      s = c.prepareStatement("CREATE TABLE " + manager.escapeTableName(tableName) + "(id INT NOT NULL, "
           + "last_modified TIMESTAMP)");
       s.executeUpdate();
       c.commit();
@@ -246,8 +258,7 @@ public class TestIncrementalImport extends TestCase {
     Connection c = manager.getConnection();
     PreparedStatement s = null;
     try {
-      s = c.prepareStatement("CREATE TABLE " + tableName
-          + "(id varchar(20) NOT NULL)");
+      s = c.prepareStatement("CREATE TABLE " + manager.escapeTableName(tableName) + "(id varchar(20) NOT NULL)");
       s.executeUpdate();
       c.commit();
       insertIdVarcharRows(tableName, 0, insertRows);
@@ -514,10 +525,10 @@ public class TestIncrementalImport extends TestCase {
       args.add("append");
       if (!appendTimestamp) {
         args.add("--check-column");
-        args.add("id");
+        args.add("ID");
       } else {
         args.add("--check-column");
-        args.add("last_modified");
+        args.add("LAST_MODIFIED");
       }
     } else {
       args.add("--incremental");
@@ -526,7 +537,7 @@ public class TestIncrementalImport extends TestCase {
       args.add("LAST_MODIFIED");
     }
     args.add("--columns");
-    args.add("id");
+    args.add("ID");
     args.add("-m");
     args.add("1");
 
@@ -543,10 +554,16 @@ public class TestIncrementalImport extends TestCase {
     if (commonArgs) {
       CommonArgs.addHadoopFlags(args);
     }
+
+    String [] directoryNames = directoryName.split("/");
+    String className = directoryNames[directoryNames.length -1];
+
     args.add("--connect");
     args.add(SOURCE_DB_URL);
     args.add("--query");
     args.add(query);
+    args.add("--class-name");
+    args.add(className);
     args.add("--target-dir");
     args.add(BaseSqoopTestCase.LOCAL_WAREHOUSE_DIR
       + System.getProperty("file.separator") + directoryName);
@@ -555,10 +572,10 @@ public class TestIncrementalImport extends TestCase {
       args.add("append");
       if (!appendTimestamp) {
         args.add("--check-column");
-        args.add("id");
+        args.add("ID");
       } else {
         args.add("--check-column");
-        args.add("last_modified");
+        args.add("LAST_MODIFIED");
       }
     } else {
       args.add("--incremental");
@@ -637,6 +654,7 @@ public class TestIncrementalImport extends TestCase {
   }
 
   // Incremental import of an empty table, no metastore.
+  @Test
   public void testEmptyAppendImport() throws Exception {
     final String TABLE_NAME = "emptyAppend1";
     createIdTable(TABLE_NAME, 0);
@@ -651,6 +669,7 @@ public class TestIncrementalImport extends TestCase {
   }
 
   // Incremental import of a filled table, no metastore.
+  @Test
   public void testFullAppendImport() throws Exception {
     final String TABLE_NAME = "fullAppend1";
     createIdTable(TABLE_NAME, 10);
@@ -664,6 +683,7 @@ public class TestIncrementalImport extends TestCase {
     assertDirOfNumbers(TABLE_NAME, 10);
   }
 
+  @Test
   public void testEmptyJobAppend() throws Exception {
     // Create a job and run an import on an empty table.
     // Nothing should happen.
@@ -682,6 +702,7 @@ public class TestIncrementalImport extends TestCase {
     assertDirOfNumbers(TABLE_NAME, 0);
   }
 
+  @Test
   public void testEmptyThenFullJobAppend() throws Exception {
     // Create an empty table. Import it; nothing happens.
     // Add some rows. Verify they are appended.
@@ -709,6 +730,7 @@ public class TestIncrementalImport extends TestCase {
     assertDirOfNumbers(TABLE_NAME, 20);
   }
 
+  @Test
   public void testEmptyThenFullJobAppendWithQuery() throws Exception {
     // Create an empty table. Import it; nothing happens.
     // Add some rows. Verify they are appended.
@@ -717,7 +739,7 @@ public class TestIncrementalImport extends TestCase {
     createIdTable(TABLE_NAME, 0);
     clearDir(TABLE_NAME);
 
-    final String QUERY = "SELECT id FROM withQuery WHERE $CONDITIONS";
+    final String QUERY = "SELECT id FROM \"withQuery\" WHERE $CONDITIONS";
 
     List<String> args = getArgListForQuery(QUERY, TABLE_NAME,
       false, true, false);
@@ -740,6 +762,7 @@ public class TestIncrementalImport extends TestCase {
     assertDirOfNumbers(TABLE_NAME, 20);
   }
 
+  @Test
   public void testAppend() throws Exception {
     // Create a table with data in it; import it.
     // Then add more data, verify that only the incremental data is pulled.
@@ -760,6 +783,7 @@ public class TestIncrementalImport extends TestCase {
     assertDirOfNumbers(TABLE_NAME, 20);
   }
 
+  @Test
   public void testEmptyLastModified() throws Exception {
     final String TABLE_NAME = "emptyLastModified";
     createTimestampTable(TABLE_NAME, 0, null);
@@ -773,6 +797,23 @@ public class TestIncrementalImport extends TestCase {
     assertDirOfNumbers(TABLE_NAME, 0);
   }
 
+  @Test
+  public void testEmptyLastModifiedWithNonExistingParentDirectory() throws Exception {
+    final String TABLE_NAME = "emptyLastModifiedNoParent";
+    final String QUERY = "SELECT id, last_modified FROM \"" + TABLE_NAME + "\" WHERE $CONDITIONS";
+    final String DIRECTORY = "non-existing/parents/" + TABLE_NAME;
+    createTimestampTable(TABLE_NAME, 0, null);
+    List<String> args = getArgListForQuery(QUERY, DIRECTORY, true, false, false);
+
+    Configuration conf = newConf();
+    SqoopOptions options = new SqoopOptions();
+    options.setConf(conf);
+    runImport(options, args);
+
+    assertDirOfNumbers(DIRECTORY, 0);
+  }
+
+  @Test
   public void testFullLastModifiedImport() throws Exception {
     // Given a table of rows imported in the past,
     // see that they are imported.
@@ -790,6 +831,7 @@ public class TestIncrementalImport extends TestCase {
     assertDirOfNumbers(TABLE_NAME, 10);
   }
 
+  @Test
   public void testNoImportFromTheFuture() throws Exception {
     // If last-modified dates for writes are serialized to be in the
     // future w.r.t. an import, do not import these rows.
@@ -808,6 +850,7 @@ public class TestIncrementalImport extends TestCase {
     assertDirOfNumbers(TABLE_NAME, 0);
   }
 
+  @Test
   public void testEmptyJobLastMod() throws Exception {
     // Create a job and run an import on an empty table.
     // Nothing should happen.
@@ -827,6 +870,7 @@ public class TestIncrementalImport extends TestCase {
     assertDirOfNumbers(TABLE_NAME, 0);
   }
 
+  @Test
   public void testEmptyThenFullJobLastMod() throws Exception {
     // Create an empty table. Import it; nothing happens.
     // Add some rows. Verify they are appended.
@@ -871,6 +915,7 @@ public class TestIncrementalImport extends TestCase {
     assertDirOfNumbers(TABLE_NAME, 20);
   }
 
+  @Test
   public void testAppendWithTimestamp() throws Exception {
     // Create a table with data in it; import it.
     // Then add more data, verify that only the incremental data is pulled.
@@ -898,6 +943,7 @@ public class TestIncrementalImport extends TestCase {
     assertDirOfNumbers(TABLE_NAME, 20);
   }
 
+  @Test
   public void testAppendWithString() throws Exception {
     // Create a table with string column in it;
     // incrementally import it on the string column - it should fail.
@@ -908,15 +954,13 @@ public class TestIncrementalImport extends TestCase {
     List<String> args = getArgListForTable(TABLE_NAME, false, true);
     args.add("--append");
     createJob(TABLE_NAME, args);
-    try {
-      runJob(TABLE_NAME);
-      //the above line should throw an exception otherwise the test has failed
-      fail("Expected incremental import on varchar column to fail.");
-    } catch(RuntimeException e) {
-      //expected
-    }
+
+    thrown.expect(RuntimeException.class);
+    thrown.reportMissingExceptionWithMessage("Expected incremental import on varchar column to fail");
+    runJob(TABLE_NAME);
   }
 
+  @Test
   public void testModifyWithTimestamp() throws Exception {
     // Create a table with data in it; import it.
     // Then modify some existing rows, and verify that we only grab
@@ -943,8 +987,7 @@ public class TestIncrementalImport extends TestCase {
     Connection c = manager.getConnection();
     PreparedStatement s = null;
     try {
-      s = c.prepareStatement("UPDATE " + TABLE_NAME
-          + " SET id=?, last_modified=? WHERE id=?");
+      s = c.prepareStatement("UPDATE " + manager.escapeTableName(TABLE_NAME) + " SET id=?, last_modified=? WHERE id=?");
       s.setInt(1, 4000); // the first row should have '4000' in it now.
       s.setTimestamp(2, new Timestamp(rowsAddedTime));
       s.setInt(3, 0);
@@ -959,7 +1002,7 @@ public class TestIncrementalImport extends TestCase {
     runJob(TABLE_NAME);
     assertFirstSpecificNumber(TABLE_NAME, 4000);
   }
-
+  @Test
   public void testUpdateModifyWithTimestamp() throws Exception {
     // Create a table with data in it; import it.
     // Then modify some existing rows, and verify that we only grab
@@ -989,8 +1032,7 @@ public class TestIncrementalImport extends TestCase {
     Connection c = manager.getConnection();
     PreparedStatement s = null;
     try {
-      s = c.prepareStatement("UPDATE " + TABLE_NAME
-          + " SET id=?, last_modified=? WHERE id=?");
+      s = c.prepareStatement("UPDATE " + manager.escapeTableName(TABLE_NAME) + " SET id=?, last_modified=? WHERE id=?");
       s.setInt(1, 4000); // the first row should have '4000' in it now.
       s.setTimestamp(2, new Timestamp(rowsAddedTime));
       s.setInt(3, 0);
@@ -1004,7 +1046,7 @@ public class TestIncrementalImport extends TestCase {
     args.add("--last-value");
     args.add(new Timestamp(importWasBefore).toString());
     args.add("--merge-key");
-    args.add("id");
+    args.add("ID");
     conf = newConf();
     options = new SqoopOptions();
     options.setConf(conf);
@@ -1012,6 +1054,7 @@ public class TestIncrementalImport extends TestCase {
     assertSpecificNumber(TABLE_NAME, 4000);
   }
 
+  @Test
   public void testUpdateModifyWithTimestampWithQuery() throws Exception {
     // Create an empty table. Import it; nothing happens.
     // Add some rows. Verify they are appended.
@@ -1020,7 +1063,7 @@ public class TestIncrementalImport extends TestCase {
     Timestamp thePast = new Timestamp(System.currentTimeMillis() - 100);
     createTimestampTable(TABLE_NAME, 10, thePast);
 
-    final String QUERY = "SELECT id, last_modified FROM UpdateModifyWithTimestampWithQuery WHERE $CONDITIONS";
+    final String QUERY = "SELECT id, last_modified FROM \"UpdateModifyWithTimestampWithQuery\" WHERE $CONDITIONS";
 
     List<String> args = getArgListForQuery(QUERY, TABLE_NAME,
         true, false, false);
@@ -1043,8 +1086,7 @@ public class TestIncrementalImport extends TestCase {
     Connection c = manager.getConnection();
     PreparedStatement s = null;
     try {
-      s = c.prepareStatement("UPDATE " + TABLE_NAME
-          + " SET id=?, last_modified=? WHERE id=?");
+      s = c.prepareStatement("UPDATE " + manager.escapeTableName(TABLE_NAME) + " SET id=?, last_modified=? WHERE id=?");
       s.setInt(1, 4000); // the first row should have '4000' in it now.
       s.setTimestamp(2, new Timestamp(rowsAddedTime));
       s.setInt(3, 0);
@@ -1058,7 +1100,7 @@ public class TestIncrementalImport extends TestCase {
     args.add("--last-value");
     args.add(new Timestamp(importWasBefore).toString());
     args.add("--merge-key");
-    args.add("id");
+    args.add("ID");
     conf = newConf();
     options = new SqoopOptions();
     options.setConf(conf);
@@ -1066,6 +1108,7 @@ public class TestIncrementalImport extends TestCase {
     assertSpecificNumber(TABLE_NAME, 4000);
   }
 
+  @Test
   public void testUpdateModifyWithTimestampJob() throws Exception {
     // Create a table with data in it; import it.
     // Then modify some existing rows, and verify that we only grab
@@ -1077,7 +1120,7 @@ public class TestIncrementalImport extends TestCase {
 
     List<String> args = getArgListForTable(TABLE_NAME, false, false);
     args.add("--merge-key");
-    args.add("id");
+    args.add("ID");
     createJob(TABLE_NAME, args);
     runJob(TABLE_NAME);
     assertDirOfNumbers(TABLE_NAME, 10);
@@ -1094,8 +1137,7 @@ public class TestIncrementalImport extends TestCase {
     Connection c = manager.getConnection();
     PreparedStatement s = null;
     try {
-      s = c.prepareStatement("UPDATE " + TABLE_NAME
-          + " SET id=?, last_modified=? WHERE id=?");
+      s = c.prepareStatement("UPDATE " + manager.escapeTableName(TABLE_NAME) + " SET id=?, last_modified=? WHERE id=?");
       s.setInt(1, 4000); // the first row should have '4000' in it now.
       s.setTimestamp(2, new Timestamp(rowsAddedTime));
       s.setInt(3, 0);
@@ -1143,6 +1185,7 @@ public class TestIncrementalImport extends TestCase {
     }
   }
 
+  @Test
   public void testTimestampBoundary() throws Exception {
     // Run an import, and then insert rows with the last-modified timestamp
     // set to the exact time when the first import runs. Run a second import
@@ -1181,6 +1224,7 @@ public class TestIncrementalImport extends TestCase {
     assertDirOfNumbers(TABLE_NAME, 20);
   }
 
+  @Test
   public void testIncrementalAppendTimestamp() throws Exception {
     // Run an import, and then insert rows with the last-modified timestamp
     // set to the exact time when the first import runs. Run a second import
@@ -1217,5 +1261,80 @@ public class TestIncrementalImport extends TestCase {
     runJob(TABLE_NAME);
     assertDirOfNumbers(TABLE_NAME, 20);
   }
+  @Test
+	public void testIncrementalHiveAppendEmptyThenFull() throws Exception {
+		// This is to test Incremental Hive append feature. SQOOP-2470
+		final String TABLE_NAME = "incrementalHiveAppendEmptyThenFull";
+		Configuration conf = newConf();
+		conf.set(ConnFactory.FACTORY_CLASS_NAMES_KEY,
+				InstrumentHsqldbManagerFactory.class.getName());
+		clearDir(TABLE_NAME);
+		createIdTable(TABLE_NAME, 0);
+		List<String> args = new ArrayList<String>();
+		args.add("--connect");
+		args.add(SOURCE_DB_URL);
+		args.add("--table");
+		args.add(TABLE_NAME);
+		args.add("--warehouse-dir");
+		args.add(BaseSqoopTestCase.LOCAL_WAREHOUSE_DIR);
+		args.add("--hive-import");
+		args.add("--hive-table");
+		args.add(TABLE_NAME + "hive");
+		args.add("--incremental");
+		args.add("append");
+		args.add("--check-column");
+		args.add("ID");
+		args.add("-m");
+		args.add("1");
+		createJob(TABLE_NAME, args, conf);
+		HiveImport.setTestMode(true);
+		String hiveHome = org.apache.sqoop.SqoopOptions.getHiveHomeDefault();
+		assertNotNull("hive.home was not set", hiveHome);
+		String testDataPath = new Path(new Path(hiveHome), "scripts/"
+				+ "incrementalHiveAppendEmpty.q").toString();
+		System.clearProperty("expected.script");
+		System.setProperty("expected.script",
+				new File(testDataPath).getAbsolutePath());
+		runJob(TABLE_NAME);
+		assertDirOfNumbers(TABLE_NAME, 0);
+		// Now add some rows.
+		insertIdRows(TABLE_NAME, 0, 10);
+		String testDataPath10 = new Path(new Path(hiveHome), "scripts/"
+				+ "incrementalHiveAppend10.q").toString();
+		System.clearProperty("expected.script");
+		System.setProperty("expected.script",
+				new File(testDataPath10).getAbsolutePath());
+		System.getProperty("expected.script");
+		// Running the job a second time should import 10 rows.
+		runJob(TABLE_NAME);
+		assertDirOfNumbers(TABLE_NAME, 10);
+		// Add some more rows.
+		insertIdRows(TABLE_NAME, 10, 20);
+		String testDataPath20 = new Path(new Path(hiveHome), "scripts/"
+				+ "incrementalHiveAppend20.q").toString();
+		System.clearProperty("expected.script");
+		System.setProperty("expected.script",
+				new File(testDataPath20).getAbsolutePath());
+		// Import only those rows.
+		runJob(TABLE_NAME);
+		assertDirOfNumbers(TABLE_NAME, 20);
+	}
+
+  // SQOOP-1890
+  @Test
+  public void testTableNameWithSpecialCharacters() throws Exception {
+    // Table name with special characters to verify proper table name escaping
+    final String TABLE_NAME = "my-table.ext";
+    createIdTable(TABLE_NAME, 0);
+
+    // Now add some rows.
+    insertIdRows(TABLE_NAME, 0, 10);
+
+    List<String> args = getArgListForTable(TABLE_NAME, false, true);
+    createJob("emptyJob", args);
+    runJob("emptyJob");
+    assertDirOfNumbers(TABLE_NAME, 10);
+  }
+
 }
 

@@ -20,13 +20,16 @@ package com.cloudera.sqoop.manager;
 
 import java.io.IOException;
 import java.sql.Connection;
-import java.sql.SQLException;
 import java.sql.PreparedStatement;
-import java.util.Arrays;
+import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.Arrays;
+
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.mapred.JobConf;
+import org.junit.Test;
+
 import com.cloudera.sqoop.TestExport;
 import com.cloudera.sqoop.mapreduce.db.DBConfiguration;
 
@@ -185,55 +188,20 @@ public class PGBulkloadManagerManualTest extends TestExport {
     // PGBulkloadManager does not support --columns option.
   }
 
-
+	@Test
   public void testMultiReduceExport() throws IOException, SQLException {
-    String[] genericargs = newStrArray(null, "-Dmapred.reduce.tasks=2");
-    multiFileTestWithGenericArgs(2, 10, 2, genericargs);
+    multiFileTest(2, 10, 2, "-D", "mapred.reduce.tasks=2");
   }
 
-
-  public void testMultiReduceExportWithNewProp() throws IOException, SQLException {
-    String[] genericargs = newStrArray(null, "-Dmapreduce.job.reduces=2");
-    multiFileTestWithGenericArgs(2, 10, 2, genericargs);
+	@Test
+  public void testMultiReduceExportWithNewProp()
+      throws IOException, SQLException {
+    multiFileTest(2, 10, 2, "-D", "mapreduce.job.reduces=2");
   }
 
-
+	@Test
   public void testExportWithTablespace() throws IOException, SQLException {
-    String[] genericargs =
-      newStrArray(null, "-Dpgbulkload.staging.tablespace=" + TABLESPACE);
-    multiFileTestWithGenericArgs(1, 10, 1, genericargs);
-  }
-
-
-  protected void multiFileTestWithGenericArgs(int numFiles,
-                                              int recordsPerMap,
-                                              int numMaps,
-                                              String[] genericargs,
-                                              String... argv)
-    throws IOException, SQLException {
-
-    final int TOTAL_RECORDS = numFiles * recordsPerMap;
-
-    try {
-      LOG.info("Beginning test: numFiles=" + numFiles + "; recordsPerMap="
-               + recordsPerMap + "; numMaps=" + numMaps);
-      LOG.info("  with genericargs: ");
-      for (String arg : genericargs) {
-        LOG.info("    " + arg);
-      }
-
-      for (int i = 0; i < numFiles; i++) {
-        createTextFile(i, recordsPerMap, false);
-      }
-
-      createTable();
-
-      runExport(getArgv(true, 10, 10,
-                        newStrArray(newStrArray(genericargs, argv),
-                                    "-m", "" + numMaps)));
-      verifyExport(TOTAL_RECORDS);
-    } finally {
-      LOG.info("multi-reduce test complete");
-    }
+    multiFileTest(1, 10, 1,
+                  "-D", "pgbulkload.staging.tablespace=" + TABLESPACE);
   }
 }

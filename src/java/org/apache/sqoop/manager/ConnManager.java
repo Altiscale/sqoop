@@ -32,6 +32,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.StringTokenizer;
 
+import org.apache.avro.LogicalType;
+import org.apache.avro.LogicalTypes;
 import org.apache.avro.Schema.Type;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -223,6 +225,22 @@ public abstract class ConnManager {
   }
 
   /**
+   * Resolve a database-specific type to Avro logical data type.
+   * @param sqlType     sql type
+   * @return            avro type
+   */
+  public LogicalType toAvroLogicalType(int sqlType, Integer precision, Integer scale) {
+    switch (sqlType) {
+      case Types.NUMERIC:
+      case Types.DECIMAL:
+        return LogicalTypes.decimal(precision, scale);
+      default:
+        throw new IllegalArgumentException("Cannot convert SQL type "
+            + sqlType + " to avro logical type");
+    }
+  }
+
+  /**
    * Return java type for SQL type.
    * @param tableName   table name
    * @param columnName  column name
@@ -256,6 +274,20 @@ public abstract class ConnManager {
   public Type toAvroType(String tableName, String columnName, int sqlType) {
     // ignore table name and column name by default.
     return toAvroType(sqlType);
+  }
+
+  /**
+   * Return avro logical type for SQL type.
+   * @param tableName   table name
+   * @param columnName  column name
+   * @param sqlType     sql type
+   * @param precision   precision
+   * @param scale       scale
+   * @return            avro type
+   */
+  public LogicalType toAvroLogicalType(String tableName, String columnName, int sqlType, Integer precision, Integer scale) {
+    // ignore table name and column name by default.
+    return toAvroLogicalType(sqlType, precision, scale);
   }
 
   /**
@@ -572,6 +604,21 @@ public abstract class ConnManager {
   }
 
   /**
+   * Variant of escapeColName() method that will escape whole column name array.
+   *
+   * @param colNames Column names as provided by the user, etc.
+   * @return
+   */
+  public String [] escapeColNames(String ...colNames) {
+    String [] escaped = new String[colNames.length];
+    int i = 0;
+    for(String colName : colNames) {
+      escaped[i++] = escapeColName(colName);
+    }
+    return escaped;
+  }
+
+  /**
    * When using a table name in a generated SQL query, how (if at all)
    * should we escape that column name? e.g., a table named "table"
    * may need to be quoted with backtiks: "`table`".
@@ -794,5 +841,25 @@ public abstract class ConnManager {
   public boolean isDirectModeHCatSupported() {
     return false;
   }
+
+
+  /**
+   * Determine if HBase operations from direct mode of the connector is
+   * allowed.  By default direct mode is not compatible with HBase
+   * @return Whether direct mode is allowed.
+   */
+  public boolean isDirectModeHBaseSupported() {
+    return false;
+  }
+
+  /**
+   * Determine if Accumulo operations from direct mode of the connector is
+   * allowed.  By default direct mode is not compatible with HBase
+   * @return Whether direct mode is allowed.
+   */
+  public boolean isDirectModeAccumuloSupported() {
+    return false;
+  }
+
 }
 

@@ -30,6 +30,7 @@ import org.apache.hadoop.mapred.FileInputFormat;
 import org.apache.hadoop.mapred.FileOutputFormat;
 import org.apache.hadoop.mapred.JobClient;
 import org.apache.hadoop.mapred.JobConf;
+import org.apache.sqoop.tool.BaseSqoopTool;
 
 import com.cloudera.sqoop.SqoopOptions;
 import com.cloudera.sqoop.SqoopOptions.InvalidOptionsException;
@@ -38,6 +39,10 @@ import com.cloudera.sqoop.config.ConfigurationHelper;
 import com.cloudera.sqoop.testutil.ExplicitSetMapper;
 import com.cloudera.sqoop.tool.ImportTool;
 import com.cloudera.sqoop.util.ClassLoaderStack;
+import org.junit.Test;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.fail;
 
 /**
  * Test that the parse() methods generated in user SqoopRecord implementations
@@ -84,6 +89,16 @@ public class TestParseMethods extends ImportJobTestCase {
     args.add("1");
 
     return args.toArray(new String[0]);
+  }
+
+  @Test
+  public void testTemporaryRootDirParse() throws Exception {
+    String customRoot = "customroot";
+    String[] args = new String[] {"--"+BaseSqoopTool.TEMP_ROOTDIR_ARG, customRoot};
+
+    SqoopOptions opts = new ImportTool().parseArguments(args, null, null, true);
+
+    assertEquals(customRoot, opts.getTempRootDir());
   }
 
   public void runParseTest(String fieldTerminator, String lineTerminator,
@@ -146,6 +161,7 @@ public class TestParseMethods extends ImportJobTestCase {
     }
   }
 
+  @Test
   public void testDefaults() throws IOException {
     String [] types = { "INTEGER", "VARCHAR(32)", "INTEGER" };
     String [] vals = { "64", "'foo'", "128" };
@@ -154,6 +170,7 @@ public class TestParseMethods extends ImportJobTestCase {
     runParseTest(",", "\\n", "\\\"", "\\", false);
   }
 
+  @Test
   public void testRequiredEnclose() throws IOException {
     String [] types = { "INTEGER", "VARCHAR(32)", "INTEGER" };
     String [] vals = { "64", "'foo'", "128" };
@@ -162,6 +179,7 @@ public class TestParseMethods extends ImportJobTestCase {
     runParseTest(",", "\\n", "\\\"", "\\", true);
   }
 
+  @Test
   public void testStringEscapes() throws IOException {
     String [] types = {
       "VARCHAR(32)",
@@ -182,6 +200,7 @@ public class TestParseMethods extends ImportJobTestCase {
     runParseTest(",", "\\n", "\\\'", "\\", false);
   }
 
+  @Test
   public void testNumericTypes() throws IOException {
     String [] types = {
       "INTEGER",
@@ -208,6 +227,7 @@ public class TestParseMethods extends ImportJobTestCase {
     runParseTest(",", "\\n", "\\\'", "\\", false);
   }
 
+  @Test
   public void testFieldSetter() throws IOException {
     ClassLoader prevClassLoader = null;
 

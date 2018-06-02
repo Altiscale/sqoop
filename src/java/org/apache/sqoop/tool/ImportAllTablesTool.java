@@ -28,7 +28,6 @@ import org.apache.commons.cli.OptionBuilder;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 
-import com.cloudera.sqoop.Sqoop;
 import com.cloudera.sqoop.SqoopOptions;
 import com.cloudera.sqoop.SqoopOptions.InvalidOptionsException;
 import com.cloudera.sqoop.cli.RelatedOptions;
@@ -98,10 +97,16 @@ public class ImportAllTablesTool extends com.cloudera.sqoop.tool.ImportTool {
         LOG.error("manager.listTables() returned null");
         return 1;
       } else {
+        int numMappers = options.getNumMappers();
         for (String tableName : tables) {
           if (excludes.contains(tableName)) {
             System.out.println("Skipping table: " + tableName);
           } else {
+            /*
+             * Number of mappers could be potentially reset in imports.  So
+             * we set it to the configured number before each import.
+             */
+            options.setNumMappers(numMappers);
             importTable(options, tableName, hiveImport);
           }
         }
@@ -109,18 +114,12 @@ public class ImportAllTablesTool extends com.cloudera.sqoop.tool.ImportTool {
     } catch (IOException ioe) {
       LOG.error("Encountered IOException running import job: "
           + ioe.toString());
-      if (System.getProperty(Sqoop.SQOOP_RETHROW_PROPERTY) != null) {
-        throw new RuntimeException(ioe);
-      } else {
-        return 1;
-      }
+      rethrowIfRequired(options, ioe);
+      return 1;
     } catch (ImportException ie) {
       LOG.error("Error during import: " + ie.toString());
-      if (System.getProperty(Sqoop.SQOOP_RETHROW_PROPERTY) != null) {
-        throw new RuntimeException(ie);
-      } else {
-        return 1;
-      }
+      rethrowIfRequired(options, ie);
+      return 1;
     } finally {
       destroy(options);
     }

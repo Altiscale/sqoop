@@ -24,6 +24,10 @@ import org.apache.avro.Schema;
 import org.apache.avro.Schema.Field;
 import org.apache.avro.generic.GenericData;
 import org.apache.avro.generic.GenericRecord;
+import org.junit.Rule;
+
+import org.junit.Test;
+import org.junit.rules.ExpectedException;
 import org.kitesdk.data.*;
 
 import java.io.IOException;
@@ -32,15 +36,21 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertEquals;
+
 
 /**
  * Test that we can export Parquet Data Files from HDFS into databases.
  */
 public class TestParquetExport extends ExportJobTestCase {
+
+  @Rule
+  public ExpectedException thrown = ExpectedException.none();
 
   /**
    * @return an argv for the CodeGenTool to use when creating tables to export.
@@ -143,10 +153,11 @@ public class TestParquetExport extends ExportJobTestCase {
     fields.add(buildField("id", Schema.Type.INT));
     fields.add(buildField("msg", Schema.Type.STRING));
     int colNum = 0;
-    for (ColumnGenerator gen : extraCols) {
-      if (gen.getColumnParquetSchema() != null) {
-        fields.add(buildParquetField(forIdx(colNum++),
-            gen.getColumnParquetSchema()));
+    if (null != extraCols) {
+      for (ColumnGenerator gen : extraCols) {
+        if (gen.getColumnParquetSchema() != null) {
+          fields.add(buildParquetField(forIdx(colNum++), gen.getColumnParquetSchema()));
+        }
       }
     }
     Schema schema = Schema.createRecord("myschema", null, null, false);
@@ -157,9 +168,11 @@ public class TestParquetExport extends ExportJobTestCase {
   private void addExtraColumns(GenericRecord record, int rowNum,
       ColumnGenerator[] extraCols) {
     int colNum = 0;
-    for (ColumnGenerator gen : extraCols) {
-      if (gen.getColumnParquetSchema() != null) {
-        record.put(forIdx(colNum++), gen.getExportValue(rowNum));
+    if (null != extraCols) {
+      for (ColumnGenerator gen : extraCols) {
+        if (gen.getColumnParquetSchema() != null) {
+          record.put(forIdx(colNum++), gen.getExportValue(rowNum));
+        }
       }
     }
   }
@@ -213,11 +226,11 @@ public class TestParquetExport extends ExportJobTestCase {
     StringBuilder sb = new StringBuilder();
     sb.append("CREATE TABLE ");
     sb.append(getTableName());
-    sb.append(" (id INT NOT NULL PRIMARY KEY, msg VARCHAR(64)");
+    sb.append(" (\"ID\" INT NOT NULL PRIMARY KEY, \"MSG\" VARCHAR(64)");
     int colNum = 0;
     for (ColumnGenerator gen : extraColumns) {
       if (gen.getColumnType() != null) {
-        sb.append(", " + forIdx(colNum++) + " " + gen.getColumnType());
+        sb.append(", \"" + forIdx(colNum++) + "\" " + gen.getColumnType());
       }
     }
     sb.append(")");
@@ -226,6 +239,38 @@ public class TestParquetExport extends ExportJobTestCase {
         ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY);
     try {
       statement.executeUpdate();
+      conn.commit();
+    } finally {
+      statement.close();
+    }
+  }
+
+  /**
+   * Create the table definition to export and also inserting one records for
+   * identifying the updates. Issue [SQOOP-2846]
+   */
+  private void createTableWithInsert() throws SQLException {
+    Connection conn = getConnection();
+    PreparedStatement statement = conn.prepareStatement(getDropTableStatement(getTableName()),
+        ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY);
+    try {
+      statement.executeUpdate();
+      conn.commit();
+    } finally {
+      statement.close();
+    }
+
+    StringBuilder sb = new StringBuilder();
+    sb.append("CREATE TABLE ");
+    sb.append(getTableName());
+    sb.append(" (id INT NOT NULL PRIMARY KEY, msg VARCHAR(64)");
+    sb.append(")");
+    statement = conn.prepareStatement(sb.toString(), ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY);
+    try {
+      statement.executeUpdate();
+      Statement statement2 = conn.createStatement();
+      String insertCmd = "INSERT INTO " + getTableName() + " (ID,MSG) VALUES(" + 0 + ",'testMsg');";
+      statement2.execute(insertCmd);
       conn.commit();
     } finally {
       statement.close();
@@ -241,7 +286,7 @@ public class TestParquetExport extends ExportJobTestCase {
     LOG.info("Verifying column " + colName + " has value " + expectedVal);
 
     PreparedStatement statement = conn.prepareStatement(
-        "SELECT " + colName + " FROM " + getTableName() + " WHERE id = " + id,
+        "SELECT \"" + colName + "\" FROM " + getTableName() + " WHERE \"ID\" = " + id,
         ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY);
     Object actualVal = null;
     try {
@@ -282,6 +327,7 @@ public class TestParquetExport extends ExportJobTestCase {
     assertColValForRowId(maxId, colName, expectedMax);
   }
 
+  @Test
   public void testSupportedParquetTypes() throws IOException, SQLException {
     String[] argv = {};
     final int TOTAL_RECORDS = 1 * 10;
@@ -315,13 +361,14 @@ public class TestParquetExport extends ExportJobTestCase {
     }
   }
 
+  @Test
   public void testNullableField() throws IOException, SQLException {
     String[] argv = {};
     final int TOTAL_RECORDS = 1 * 10;
 
     List<Schema> childSchemas = new ArrayList<Schema>();
-    childSchemas.add(Schema.create(Schema.Type.STRING));
     childSchemas.add(Schema.create(Schema.Type.NULL));
+    childSchemas.add(Schema.create(Schema.Type.STRING));
     Schema schema =  Schema.createUnion(childSchemas);
     ColumnGenerator gen0 = colGenerator(null, schema, null, "VARCHAR(64)");
     ColumnGenerator gen1 = colGenerator("s", schema, "s", "VARCHAR(64)");
@@ -333,6 +380,7 @@ public class TestParquetExport extends ExportJobTestCase {
     assertColMinAndMax(forIdx(1), gen1);
   }
 
+  @Test
   public void testParquetRecordsNotSupported() throws IOException, SQLException {
     String[] argv = {};
     final int TOTAL_RECORDS = 1;
@@ -346,15 +394,13 @@ public class TestParquetExport extends ExportJobTestCase {
     ColumnGenerator gen = colGenerator(record, schema, null, "VARCHAR(64)");
     createParquetFile(0, TOTAL_RECORDS,  gen);
     createTable(gen);
-    try {
-      runExport(getArgv(true, 10, 10, newStrArray(argv, "-m", "" + 1)));
-      fail("Parquet records can not be exported.");
-    } catch (Exception e) {
-      // expected
-      assertTrue(true);
-    }
+
+    thrown.expect(Exception.class);
+    thrown.reportMissingExceptionWithMessage("Expected Exception as Parquet records are not supported");
+    runExport(getArgv(true, 10, 10, newStrArray(argv, "-m", "" + 1)));
   }
 
+  @Test
   public void testMissingDatabaseFields() throws IOException, SQLException {
     String[] argv = {};
     final int TOTAL_RECORDS = 1;
@@ -369,6 +415,32 @@ public class TestParquetExport extends ExportJobTestCase {
     verifyExport(TOTAL_RECORDS);
   }
 
+  @Test
+  public void testParquetWithUpdateKey() throws IOException, SQLException {
+    String[] argv = { "--update-key", "ID" };
+    final int TOTAL_RECORDS = 1;
+    createParquetFile(0, TOTAL_RECORDS, null);
+    createTableWithInsert();
+    runExport(getArgv(true, 10, 10, newStrArray(argv, "-m", "" + 1)));
+    verifyExport(getMsgPrefix() + "0");
+  }
+
+  // Test Case for Issue [SQOOP-2846]
+  @Test
+  public void testParquetWithUpsert() throws IOException, SQLException {
+    String[] argv = { "--update-key", "ID", "--update-mode", "allowinsert" };
+    final int TOTAL_RECORDS = 2;
+    // ColumnGenerator gen = colGenerator("100",
+    // Schema.create(Schema.Type.STRING), null, "VARCHAR(64)");
+    createParquetFile(0, TOTAL_RECORDS, null);
+    createTableWithInsert();
+
+    thrown.expect(Exception.class);
+    thrown.reportMissingExceptionWithMessage("Expected Exception during Parquet export with --update-mode");
+    runExport(getArgv(true, 10, 10, newStrArray(argv, "-m", "" + 1)));
+  }
+
+  @Test
   public void testMissingParquetFields()  throws IOException, SQLException {
     String[] argv = {};
     final int TOTAL_RECORDS = 1;
@@ -377,13 +449,11 @@ public class TestParquetExport extends ExportJobTestCase {
     ColumnGenerator gen = colGenerator(null, null, null, "VARCHAR(64)");
     createParquetFile(0, TOTAL_RECORDS, gen);
     createTable(gen);
-    try {
-      runExport(getArgv(true, 10, 10, newStrArray(argv, "-m", "" + 1)));
-      fail("Missing Parquet field.");
-    } catch (Exception e) {
-      // expected
-      assertTrue(true);
-    }
+
+    thrown.expect(Exception.class);
+    thrown.reportMissingExceptionWithMessage("Expected Exception on missing Parquet fields");
+    runExport(getArgv(true, 10, 10, newStrArray(argv, "-m", "" + 1)));
   }
+
 
 }

@@ -25,7 +25,8 @@ import java.io.OutputStreamWriter;
 import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
-import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.LinkedList;
 import java.util.List;
 
 import org.apache.commons.logging.Log;
@@ -34,6 +35,7 @@ import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.mapred.FileOutputCommitter;
 import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hadoop.util.Shell;
 import org.apache.hadoop.util.ToolRunner;
@@ -113,7 +115,7 @@ public class HiveImport {
    * from where we put it, before running Hive LOAD DATA INPATH.
    */
   private void removeTempLogs(Path tablePath) throws IOException {
-    FileSystem fs = FileSystem.get(configuration);
+    FileSystem fs = tablePath.getFileSystem(configuration);
     Path logsPath = new Path(tablePath, "_logs");
     if (fs.exists(logsPath)) {
       LOG.info("Removing temporary files from import process: " + logsPath);
@@ -261,7 +263,7 @@ public class HiveImport {
    * @throws IOException
    */
   private void cleanUp(Path outputPath) throws IOException {
-    FileSystem fs = FileSystem.get(configuration);
+    FileSystem fs = outputPath.getFileSystem(configuration);
 
     // HIVE is not always removing input directory after LOAD DATA statement
     // (which is our export directory). We're removing export directory in case
@@ -272,6 +274,9 @@ public class HiveImport {
         FileStatus[] statuses = fs.listStatus(outputPath);
         if (statuses.length == 0) {
           LOG.info("Export directory is empty, removing it.");
+          fs.delete(outputPath, true);
+        } else if (statuses.length == 1 && statuses[0].getPath().getName().equals(FileOutputCommitter.SUCCEEDED_FILE_NAME)) {
+          LOG.info("Export directory is contains the _SUCCESS file only, removing the directory.");
           fs.delete(outputPath, true);
         } else {
           LOG.info("Export directory is not empty, keeping it.");
@@ -319,14 +324,11 @@ public class HiveImport {
       subprocessSM = new SubprocessSecurityManager();
       subprocessSM.install();
 
-      // Create the argv for the Hive Cli Driver.
-      String [] argArray = new String[2];
-      argArray[0] = "-f";
-      argArray[1] = filename;
+      String[] argv = getHiveArgs("-f", filename);
 
       // And invoke the static method on this array.
-      Method mainMethod = cliDriverClass.getMethod("main", argArray.getClass());
-      mainMethod.invoke(null, (Object) argArray);
+      Method mainMethod = cliDriverClass.getMethod("main", String[].class);
+      mainMethod.invoke(null, (Object) argv);
 
     } catch (ClassNotFoundException cnfe) {
       // Hive is not on the classpath. Run externally.
@@ -373,17 +375,28 @@ public class HiveImport {
       throws IOException {
     // run Hive on the script and note the return code.
     String hiveExec = getHiveBinPath();
-    ArrayList<String> args = new ArrayList<String>();
-    args.add(hiveExec);
-    args.add("-f");
-    args.add(filename);
+
+    String[] argv = getHiveArgs(hiveExec, "-f", filename);
 
     LoggingAsyncSink logSink = new LoggingAsyncSink(LOG);
-    int ret = Executor.exec(args.toArray(new String[0]),
-        env.toArray(new String[0]), logSink, logSink);
+    int ret = Executor.exec(argv, env.toArray(new String[0]), logSink, logSink);
     if (0 != ret) {
       throw new IOException("Hive exited with status " + ret);
     }
+  }
+
+  private String[] getHiveArgs(String... args) throws IOException {
+    List<String> newArgs = new LinkedList<String>();
+    newArgs.addAll(Arrays.asList(args));
+
+    HiveConfig.addHiveConfigs(HiveConfig.getHiveConf(configuration), configuration);
+
+    if (configuration.getBoolean(HiveConfig.HIVE_SASL_ENABLED, false)) {
+      newArgs.add("--hiveconf");
+      newArgs.add("hive.metastore.sasl.enabled=true");
+    }
+
+    return newArgs.toArray(new String[newArgs.size()]);
   }
 }
 

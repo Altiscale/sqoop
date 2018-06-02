@@ -18,39 +18,40 @@
 
 package com.cloudera.sqoop.hbase;
 
-import java.io.IOException;
-import java.util.ArrayList;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 
+import java.io.File;
+import java.io.IOException;
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.UUID;
+
+import org.apache.commons.io.FileUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-
 import org.apache.hadoop.conf.Configuration;
-
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.MiniHBaseCluster;
-import org.apache.hadoop.hbase.master.HMaster;
-import org.apache.hadoop.hbase.zookeeper.MiniZooKeeperCluster;
-
 import org.apache.hadoop.hbase.client.Get;
 import org.apache.hadoop.hbase.client.HTable;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.ResultScanner;
+import org.apache.hadoop.hbase.master.HMaster;
 import org.apache.hadoop.hbase.util.Bytes;
-
+import org.apache.hadoop.hbase.zookeeper.MiniZooKeeperCluster;
 import org.apache.hadoop.util.StringUtils;
-
 import org.junit.After;
 import org.junit.Before;
 
 import com.cloudera.sqoop.testutil.CommonArgs;
 import com.cloudera.sqoop.testutil.HsqldbTestServer;
 import com.cloudera.sqoop.testutil.ImportJobTestCase;
-import java.io.File;
-import java.lang.reflect.Method;
-import java.util.UUID;
-import org.apache.commons.io.FileUtils;
 
 /**
  * Utility methods that facilitate HBase import tests.
@@ -88,7 +89,7 @@ public abstract class HBaseTestCase extends ImportJobTestCase {
     if (includeHadoopFlags) {
       CommonArgs.addHadoopFlags(args);
       args.add("-D");
-      args.add("hbase.zookeeper.property.clientPort=21818");
+      args.add("hbase.zookeeper.property.clientPort=" + zookeeperPort);
     }
 
     if (null != queryStr) {
@@ -111,7 +112,38 @@ public abstract class HBaseTestCase extends ImportJobTestCase {
     if (hbaseCreate) {
       args.add("--hbase-create-table");
     }
+    return args.toArray(new String[0]);
+  }
 
+  /**
+   * Create the argv to pass to Sqoop as incremental options.
+   * @return the argv as an array of strings.
+   */
+  protected String [] getIncrementalArgv(boolean includeHadoopFlags,
+      String hbaseTable, String hbaseColFam, boolean hbaseCreate,
+      String queryStr, boolean isAppend, boolean appendTimestamp, String checkColumn, String checkValue, String lastModifiedColumn) {
+
+    String[] argsStrArray = getArgv(includeHadoopFlags, hbaseTable, hbaseColFam, hbaseCreate, queryStr);
+    List<String> args = new ArrayList<String>(Arrays.asList(argsStrArray));
+
+    if (isAppend) {
+      args.add("--incremental");
+      args.add("append");
+      if (!appendTimestamp) {
+        args.add("--check-column");
+        args.add(checkColumn);//"ID");
+      } else {
+        args.add("--check-column");
+        args.add(lastModifiedColumn);//LAST_MODIFIED");
+      }
+    } else {
+      args.add("--incremental");
+      args.add("lastmodified");
+      args.add("--check-column");
+      args.add(checkColumn);
+      args.add("--last-value");
+      args.add(checkValue);
+    }
     return args.toArray(new String[0]);
   }
   // Starts a mini hbase cluster in this process.
@@ -120,40 +152,33 @@ public abstract class HBaseTestCase extends ImportJobTestCase {
   private String workDir = createTempDir().getAbsolutePath();
   private MiniZooKeeperCluster zookeeperCluster;
   private MiniHBaseCluster hbaseCluster;
+  private int zookeeperPort;
 
   @Override
   @Before
   public void setUp() {
     try {
+      String zookeeperDir = new File(workDir, "zk").getAbsolutePath();
+      zookeeperCluster = new MiniZooKeeperCluster();
+      zookeeperCluster.startup(new File(zookeeperDir));
+      zookeeperPort = zookeeperCluster.getClientPort();
+
       HBaseTestCase.recordTestBuildDataProperty();
       String hbaseDir = new File(workDir, "hbase").getAbsolutePath();
       String hbaseRoot = "file://" + hbaseDir;
       Configuration hbaseConf = HBaseConfiguration.create();
       hbaseConf.set(HConstants.HBASE_DIR, hbaseRoot);
       //Hbase 0.90 does not have HConstants.ZOOKEEPER_CLIENT_PORT
-      hbaseConf.setInt("hbase.zookeeper.property.clientPort", 21818);
+      hbaseConf.setInt("hbase.zookeeper.property.clientPort", zookeeperPort);
       hbaseConf.set(HConstants.ZOOKEEPER_QUORUM, "0.0.0.0");
       hbaseConf.setInt("hbase.master.info.port", -1);
       hbaseConf.setInt("hbase.zookeeper.property.maxClientCnxns", 500);
-      String zookeeperDir = new File(workDir, "zk").getAbsolutePath();
-      int zookeeperPort = 21818;
-      zookeeperCluster = new MiniZooKeeperCluster();
-      Method m;
-      Class<?> zkParam[] = {Integer.TYPE};
-      try {
-        m = MiniZooKeeperCluster.class.getDeclaredMethod("setDefaultClientPort",
-                zkParam);
-      } catch (NoSuchMethodException e) {
-        m = MiniZooKeeperCluster.class.getDeclaredMethod("setClientPort",
-                zkParam);
-      }
-      m.invoke(zookeeperCluster, new Object[]{new Integer(zookeeperPort)});
-      zookeeperCluster.startup(new File(zookeeperDir));
       hbaseCluster = new MiniHBaseCluster(hbaseConf, 1);
       HMaster master = hbaseCluster.getMaster();
       Object serverName = master.getServerName();
 
       String hostAndPort;
+      Method m;
       if (serverName instanceof String) {
         System.out.println("Server name is string, using HServerAddress.");
         m = HMaster.class.getDeclaredMethod("getMasterAddress",

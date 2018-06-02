@@ -26,16 +26,17 @@ import java.lang.reflect.Method;
 import java.sql.Connection;
 import java.sql.Statement;
 import java.sql.SQLException;
+import java.util.Random;
 import java.util.jar.JarEntry;
 import java.util.jar.JarInputStream;
 
-import junit.framework.TestCase;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.util.Shell;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 
 import com.cloudera.sqoop.SqoopOptions;
@@ -46,22 +47,35 @@ import com.cloudera.sqoop.testutil.HsqldbTestServer;
 import com.cloudera.sqoop.testutil.ImportJobTestCase;
 import com.cloudera.sqoop.tool.ImportTool;
 import com.cloudera.sqoop.util.ClassLoaderStack;
+import org.junit.rules.ExpectedException;
 
 import java.lang.reflect.Field;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 /**
  * Test that the ClassWriter generates Java classes based on the given table,
  * which compile.
  */
-public class TestClassWriter extends TestCase {
+public class TestClassWriter {
 
   public static final Log LOG =
       LogFactory.getLog(TestClassWriter.class.getName());
+  private static final String WIDE_TABLE_NAME = "WIDETABLE";
+  private static final int WIDE_TABLE_COLUMN_COUNT = 800;
+  private static final int WIDE_TABLE_ROW_COUNT = 20_000;
 
   // instance variables populated during setUp, used during tests
   private HsqldbTestServer testServer;
   private ConnManager manager;
   private SqoopOptions options;
+
+  @Rule
+  public ExpectedException thrown = ExpectedException.none();
 
   @Before
   public void setUp() {
@@ -122,12 +136,16 @@ public class TestClassWriter extends TestCase {
   static final String JAR_GEN_DIR = ImportJobTestCase.TEMP_BASE_DIR
       + "sqoop/test/jargen";
 
+  private File runGenerationTest(String[] argv, String classNameToCheck) {
+    return runGenerationTest(argv, classNameToCheck, HsqldbTestServer.getTableName());
+  }
+
   /**
    * Run a test to verify that we can generate code and it emits the output
    * files where we expect them.
    * @return
    */
-  private File runGenerationTest(String [] argv, String classNameToCheck) {
+  private File runGenerationTest(String[] argv, String classNameToCheck, String tableName) {
     File codeGenDirFile = new File(CODE_GEN_DIR);
     File classGenDirFile = new File(JAR_GEN_DIR);
 
@@ -140,7 +158,7 @@ public class TestClassWriter extends TestCase {
 
     CompilationManager compileMgr = new CompilationManager(options);
     ClassWriter writer = new ClassWriter(options, manager,
-        HsqldbTestServer.getTableName(), compileMgr);
+        tableName, compileMgr);
 
     try {
       writer.generate();
@@ -373,6 +391,8 @@ public class TestClassWriter extends TestCase {
         "9isLegalInSql"));
     assertEquals("____", ClassWriter.toJavaIdentifier("___"));
     assertEquals("__class", ClassWriter.toJavaIdentifier("_class"));
+    //Checking Java identifier for Constant PROTOCOL_VERSION
+    assertEquals("_PROTOCOL_VERSION", ClassWriter.toJavaIdentifier("PROTOCOL_VERSION"));
   }
 
   @Test
@@ -386,6 +406,38 @@ public class TestClassWriter extends TestCase {
       st.executeUpdate("CREATE TABLE " + tableName
           + " (class INT, \"9field\" INT)");
       st.executeUpdate("INSERT INTO " + tableName + " VALUES(42, 41)");
+      connection.commit();
+    } finally {
+      st.close();
+      connection.close();
+    }
+
+    String [] argv = {
+      "--bindir",
+      JAR_GEN_DIR,
+      "--outdir",
+      CODE_GEN_DIR,
+      "--package-name",
+      OVERRIDE_PACKAGE_NAME,
+    };
+
+    runGenerationTest(argv, OVERRIDE_PACKAGE_NAME + "."
+        + HsqldbTestServer.getTableName());
+  }
+
+  // Test For checking Codegneration perfroming successfully
+  // in case of Table with Column name as PROTOCOL_VERSION
+  @Test
+  public void testColumnNameAsProtocolVersion() throws SQLException {
+    // Recreate the table with column name as PROTOCOL_VERSION.
+    String tableName = HsqldbTestServer.getTableName();
+    Connection connection = testServer.getConnection();
+    Statement st = connection.createStatement();
+    try {
+      st.executeUpdate("DROP TABLE " + tableName + " IF EXISTS");
+      st.executeUpdate("CREATE TABLE " + tableName
+          + " (PROTOCOL_VERSION INT)");
+      st.executeUpdate("INSERT INTO " + tableName + " VALUES(42)");
       connection.commit();
     } finally {
       st.close();
@@ -595,31 +647,6 @@ public class TestClassWriter extends TestCase {
     fail("we shouldn't successfully generate code");
   }
 
-  private void runFailedGenerationTest(String [] argv,
-      String classNameToCheck) {
-    File codeGenDirFile = new File(CODE_GEN_DIR);
-    File classGenDirFile = new File(JAR_GEN_DIR);
-
-    try {
-      options = new ImportTool().parseArguments(argv,
-          null, options, true);
-    } catch (Exception e) {
-      LOG.error("Could not parse options: " + e.toString());
-    }
-
-    CompilationManager compileMgr = new CompilationManager(options);
-    ClassWriter writer = new ClassWriter(options, manager,
-        HsqldbTestServer.getTableName(), compileMgr);
-
-    try {
-      writer.generate();
-      compileMgr.compile();
-      fail("ORM class file generation succeeded when it was expected to fail");
-    } catch (Exception ioe) {
-      LOG.error("Got Exception from ORM generation as expected : "
-        + ioe.toString());
-    }
-  }
   /**
    * A dummy manager that declares that it ORM is self managed.
    */
@@ -639,6 +666,72 @@ public class TestClassWriter extends TestCase {
       "--outdir",
       CODE_GEN_DIR,
     };
-    runFailedGenerationTest(argv, HsqldbTestServer.getTableName());
+
+    try {
+      options = new ImportTool().parseArguments(argv,
+          null, options, true);
+    } catch (Exception e) {
+      LOG.error("Could not parse options: " + e.toString());
+    }
+
+    CompilationManager compileMgr = new CompilationManager(options);
+    ClassWriter writer = new ClassWriter(options, manager,
+        HsqldbTestServer.getTableName(), compileMgr);
+
+    writer.generate();
+
+    thrown.expect(Exception.class);
+    compileMgr.compile();
+  }
+
+  @Test(timeout = 25000)
+  public void testWideTableClassGeneration() throws Exception {
+    createWideTable();
+    options = new SqoopOptions(HsqldbTestServer.getDbUrl(), WIDE_TABLE_NAME);
+
+    // Set the option strings in an "argv" to redirect our srcdir and bindir.
+    String [] argv = {
+      "--bindir",
+      JAR_GEN_DIR,
+      "--outdir",
+      CODE_GEN_DIR,
+    };
+
+    File ormJarFile = runGenerationTest(argv, WIDE_TABLE_NAME, WIDE_TABLE_NAME);
+
+    ClassLoader prevClassLoader = ClassLoaderStack.addJarFile(ormJarFile.getCanonicalPath(),
+        WIDE_TABLE_NAME);
+    Class tableClass = Class.forName(WIDE_TABLE_NAME, true,
+        Thread.currentThread().getContextClassLoader());
+
+    Object instance = tableClass.newInstance();
+    Method setterMethod = tableClass.getMethod("setField", String.class, Object.class);
+    Random random = new Random(0);
+    for (int j = 0; j < WIDE_TABLE_ROW_COUNT; ++j) {
+      for (int i = 0; i < WIDE_TABLE_COLUMN_COUNT; ++i) {
+        setterMethod.invoke(instance, "INTFIELD" + i, random.nextInt());
+      }
+    }
+
+    if (null != prevClassLoader) {
+      ClassLoaderStack.setCurrentClassLoader(prevClassLoader);
+    }
+  }
+
+  private void createWideTable() throws Exception {
+    try (Connection conn = testServer.getConnection(); Statement stmt = conn.createStatement();) {
+      stmt.executeUpdate("DROP TABLE \"" + WIDE_TABLE_NAME + "\" IF EXISTS");
+      StringBuilder sb = new StringBuilder("CREATE TABLE \"" + WIDE_TABLE_NAME + "\" (");
+      for (int i = 0; i < WIDE_TABLE_COLUMN_COUNT; ++i) {
+        sb.append("intField" + i + " INT");
+        if (i < WIDE_TABLE_COLUMN_COUNT - 1) {
+          sb.append(",");
+        } else {
+          sb.append(")");
+        }
+      }
+      stmt.executeUpdate(sb.toString());
+      conn.commit();
+    }
   }
 }

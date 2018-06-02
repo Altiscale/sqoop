@@ -71,9 +71,18 @@ Argument                          Description
 +-m,\--num-mappers <n>+           Use 'n' map tasks to import in parallel
 +-e,\--query <statement>+         Import the results of '+statement+'.
 +\--split-by <column-name>+       Column of the table used to split work\
-                                  units
+                                  units.  Cannot be used with\
+                                  +--autoreset-to-one-mapper+ option.
++\--split-limit <n>+              Upper Limit for each split size.\
+                                  This only applies to Integer and Date columns.\
+                                  For date or timestamp fields it is calculated in seconds.
++\--autoreset-to-one-mapper+      Import should use one mapper if a table\
+                                  has no primary key and no split-by column\
+                                  is provided.  Cannot be used with\
+                                  +--split-by <col>+ option.
 +\--table <table-name>+           Table to read
 +\--target-dir <dir>+             HDFS destination dir
++\--temporary-rootdir <dir>+      HDFS directory for temporary files created during import (overrides default "_sqoop")
 +\--warehouse-dir <dir>+          HDFS parent for table destination
 +\--where <where clause>+         WHERE clause to use during import
 +-z,\--compress+                  Enable compression
@@ -206,6 +215,24 @@ multi-column indices. If your table has no index column, or has a
 multi-column key, then you must also manually choose a splitting
 column.
 
+User can override the +\--num-mapers+ by using +\--split-limit+ option.
+Using the +\--split-limit+ parameter places a limit on the size of the split
+section created. If the size of the split created is larger than the size
+specified in this parameter, then the splits would be resized to fit within
+this limit, and the number of splits will change according to that.This
+affects actual number of mappers. If size of a split calculated based on
+provided +\--num-mappers+ parameter exceeds +\--split-limit+ parameter then actual
+number of mappers will be increased.If the value specified in +\--split-limit+
+parameter is 0 or negative, the parameter will be ignored altogether and
+the split size will be calculated according to the number of mappers.
+
+If a table does not have a primary key defined and the +--split-by <col>+
+is not provided, then import will fail unless the number
+of mappers is explicitly set to one with the +--num-mappers 1+ option
+or the +--autoreset-to-one-mapper+ option is used.  The option
++--autoreset-to-one-mapper+ is typically used with the import-all-tables
+tool to automatically handle tables without a primary key in a schema.
+
 include::distributed-cache.txt[]
 
 Controlling the Import Process
@@ -302,7 +329,23 @@ Sqoop is expecting comma separated list of mapping in form <name of column>=<new
 $ sqoop import ... --map-column-java id=String,value=Integer
 ----
 
+Notice that specifying commas in --map-column-hive option, you should use URL encoded
+keys and values, for example, use DECIMAL(1%2C%201) instead of DECIMAL(1, 1).
+
 Sqoop will rise exception in case that some configured mapping will not be used.
+
+Schema name handling
+^^^^^^^^^^^^^^^^^^^^
+
+When sqoop imports data from an enterprise store, table and column names
+may have characters that are not valid Java identifier characters or
+Avro/Parquet identifiers.  To address this, sqoop translates these characters
+to _ as part of the schema creation.  Any column name starting with an _
+(underscore) character will be translated to have two underscore characters.
+For example _AVRO will be converted to __AVRO.
+
+In the case of HCatalog imports, column names are converted to lower case when
+mapped to HCatalog columns.  This may change in future.
 
 Incremental Imports
 ^^^^^^^^^^^^^^^^^^^

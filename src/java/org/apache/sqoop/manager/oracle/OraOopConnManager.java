@@ -122,13 +122,17 @@ public class OraOopConnManager extends GenericJdbcManager {
         Configuration conf = this.options.getConf();
 
         this.columnNamesInOracleTable =
-            OraOopOracleQueries.getTableColumnNames(getConnection(),
-                tableContext, OraOopUtilities
-                    .omitLobAndLongColumnsDuringImport(conf), OraOopUtilities
-                    .recallSqoopJobType(conf), true, // <-
-                                                     // onlyOraOopSupportedTypes
-                true // <- omitOraOopPseudoColumns
-                );
+          OraOopOracleQueries.getTableColumnNames(
+            getConnection(),
+            tableContext,
+            OraOopUtilities
+              .omitLobAndLongColumnsDuringImport(conf),
+            OraOopUtilities
+              .recallSqoopJobType(conf),
+            true, // <- onlyOraOopSupportedTypes
+            true, // <- omitOraOopPseudoColumns
+            options.isOracleEscapingDisabled()
+          );
       } catch (SQLException ex) {
         throw new RuntimeException(ex);
       }
@@ -151,12 +155,12 @@ public class OraOopConnManager extends GenericJdbcManager {
         String selectedColumn = selectedColumns[idx];
         // If the user did not escape this column name, then we should
         // uppercase it...
-        if (!isEscaped(selectedColumn)) {
+        if (!OracleUtils.isEscaped(selectedColumn)) {
           selectedColumns[idx] = selectedColumn.toUpperCase();
         } else {
           // If the user escaped this column name, then we should
           // retain its case...
-          selectedColumns[idx] = unescapeOracleColumnName(selectedColumn);
+          selectedColumns[idx] = OracleUtils.unescapeIdentifier(selectedColumn);
         }
       }
 
@@ -221,7 +225,7 @@ public class OraOopConnManager extends GenericJdbcManager {
       if (idx > 0) {
         sb.append(",");
       }
-      sb.append(escapeOracleColumnName(colNames.get(idx))); // <- See notes at
+      sb.append(escapeColName(colNames.get(idx))); // <- See notes at
                                                             // top about escaped
                                                             // column names
     }
@@ -513,7 +517,7 @@ public class OraOopConnManager extends GenericJdbcManager {
 
           // Unescape the column names being returned...
           int colType = columnTypes.get(columnNameInTable);
-          String key = unescapeOracleColumnName(columnNameInTable); // <- See
+          String key = OracleUtils.unescapeIdentifier(columnNameInTable); // <- See
                                                                     // notes at
                                                                     // top about
                                                                     // escaped
@@ -527,35 +531,21 @@ public class OraOopConnManager extends GenericJdbcManager {
     return this.columnTypesInOracleTable;
   }
 
-  private boolean isEscaped(String name) {
-
-    return name.startsWith("\"") && name.endsWith("\"");
-  }
-
-  private String escapeOracleColumnName(String columnName) {
-    // See notes at top about escaped column names
-    if (isEscaped(columnName)) {
-      return columnName;
-    } else {
-      return "\"" + columnName + "\"";
-    }
+  @Override
+  public String escapeColName(String colName) {
+    return OracleUtils.escapeIdentifier(colName, options.isOracleEscapingDisabled()); // <- See notes at top about escaped
+                                                                                // column names
   }
 
   @Override
-  public String escapeColName(String colName) {
-
-    return super.escapeColName(colName); // <- See notes at top about escaped
-                                         // column names
+  public String escapeTableName(String tableName) {
+    return OracleUtils.escapeIdentifier(tableName, options.isOracleEscapingDisabled());
   }
 
-  private String unescapeOracleColumnName(String columnName) {
-
-    if (isEscaped(columnName)) {
-      return columnName.substring(1, columnName.length() - 1);
-    } else {
-      return columnName;
+   @Override
+   public boolean escapeTableNameOnExport() {
+        return true;
     }
-  }
 
   private void logImportTableDetails(ImportJobContext context) {
 
@@ -631,5 +621,31 @@ public class OraOopConnManager extends GenericJdbcManager {
             .getJavaClassPath());
     LOG.fatal(msg, ex);
   }
+  /**
+   * Determine if HCat integration from direct mode of the connector is
+   * allowed.  By default direct mode is not compatible with HCat
+   * @return Whether direct mode is allowed.
+   */
+  @Override
+  public boolean isDirectModeHCatSupported() {
+    return true;
+  }
 
+  /**
+   * Determine if HBase operations from direct mode of the connector is
+   * allowed.  By default direct mode is not compatible with HBase
+   * @return Whether direct mode is allowed.
+   */
+  public boolean isDirectModeHBaseSupported() {
+    return true;
+  }
+
+  /**
+   * Determine if Accumulo operations from direct mode of the connector is
+   * allowed.  By default direct mode is not compatible with HBase
+   * @return Whether direct mode is allowed.
+   */
+  public boolean isDirectModeAccumuloSupported() {
+    return true;
+  }
 }

@@ -23,16 +23,26 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.apache.avro.generic.GenericRecord;
 import org.apache.commons.lang.StringUtils;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.IOUtils;
 import org.junit.Before;
+import org.junit.After;
 
 import com.cloudera.sqoop.testutil.CommonArgs;
 import com.cloudera.sqoop.testutil.ImportJobTestCase;
 import com.cloudera.sqoop.tool.ImportAllTablesTool;
+import org.junit.Test;
+import org.kitesdk.data.Dataset;
+import org.kitesdk.data.DatasetReader;
+import org.kitesdk.data.Datasets;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.fail;
 
 /**
  * Test the --all-tables functionality that can import multiple tables.
@@ -43,13 +53,10 @@ public class TestAllTables extends ImportJobTestCase {
    * Create the argv to pass to Sqoop.
    * @return the argv as an array of strings.
    */
-  private String [] getArgv(boolean includeHadoopFlags, String[] excludeTables) {
+  private String [] getArgv(String[] extraArgs, String[] excludeTables) {
     ArrayList<String> args = new ArrayList<String>();
 
-    if (includeHadoopFlags) {
-      CommonArgs.addHadoopFlags(args);
-    }
-
+    CommonArgs.addHadoopFlags(args);
     args.add("--warehouse-dir");
     args.add(getWarehouseDir());
     args.add("--connect");
@@ -61,6 +68,11 @@ public class TestAllTables extends ImportJobTestCase {
     if (excludeTables != null) {
       args.add("--exclude-tables");
       args.add(StringUtils.join(excludeTables, ","));
+    }
+    if (extraArgs != null) {
+      for (String arg : extraArgs) {
+        args.add(arg);
+      }
     }
 
     return args.toArray(new String[0]);
@@ -110,8 +122,21 @@ public class TestAllTables extends ImportJobTestCase {
     }
   }
 
+  @After
+  public void tearDown() {
+    try {
+      for (String table : tableNames) {
+        dropTableIfExists(table);
+      }
+    } catch(SQLException e) {
+      LOG.error("Can't clean up the database:", e);
+    }
+    super.tearDown();
+  }
+
+  @Test
   public void testMultiTableImport() throws IOException {
-    String [] argv = getArgv(true, null);
+    String [] argv = getArgv(null, null);
     runImport(new ImportAllTablesTool(), argv);
 
     Path warehousePath = new Path(this.getWarehouseDir());
@@ -146,9 +171,40 @@ public class TestAllTables extends ImportJobTestCase {
     }
   }
 
+  @Test
+  public void testMultiTableImportAsParquetFormat() throws IOException {
+    String [] argv = getArgv(new String[]{"--as-parquetfile"}, null);
+    runImport(new ImportAllTablesTool(), argv);
+
+    Path warehousePath = new Path(this.getWarehouseDir());
+    int i = 0;
+    for (String tableName : this.tableNames) {
+      Path tablePath = new Path(warehousePath, tableName);
+      Dataset dataset = Datasets.load("dataset:file:" + tablePath);
+
+      // dequeue the expected value for this table. This
+      // list has the same order as the tableNames list.
+      String expectedVal = Integer.toString(i++) + ","
+          + this.expectedStrings.get(0);
+      this.expectedStrings.remove(0);
+
+      DatasetReader<GenericRecord> reader = dataset.newReader();
+      try {
+        GenericRecord record = reader.next();
+        String line = record.get(0) + "," + record.get(1);
+        assertEquals("Table " + tableName + " expected a different string",
+            expectedVal, line);
+        assertFalse(reader.hasNext());
+      } finally {
+        reader.close();
+      }
+    }
+  }
+
+  @Test
   public void testMultiTableImportWithExclude() throws IOException {
     String exclude = this.tableNames.get(0);
-    String [] argv = getArgv(true, new String[]{ exclude });
+    String [] argv = getArgv(null, new String[]{ exclude });
     runImport(new ImportAllTablesTool(), argv);
 
     Path warehousePath = new Path(this.getWarehouseDir());

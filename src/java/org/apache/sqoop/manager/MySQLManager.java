@@ -59,8 +59,33 @@ public class MySQLManager
   // set to true after we warn the user that we can use direct fastpath.
   private static boolean warningPrinted = false;
 
+  private static final String EXPORT_OPERATION = "export";
+
   public MySQLManager(final SqoopOptions opts) {
     super(DRIVER_CLASS, opts);
+  }
+
+  @Override
+  protected void initOptionDefaults() {
+    if (options.getFetchSize() == null) {
+      LOG.info("Preparing to use a MySQL streaming resultset.");
+        String operation = options.getToolName();
+      if (StringUtils.isNotBlank(operation) && operation.equalsIgnoreCase(EXPORT_OPERATION)) {
+          // Set fetch size to zero for export operation, see SQOOP-2787 for more details. Setting fetchsize to 0
+          // would not overwhelm the JVM as the queries during export are primarily metadata queries
+          options.setFetchSize(0);
+      } else {
+          options.setFetchSize(Integer.MIN_VALUE);
+      }
+    } else if (
+        !options.getFetchSize().equals(Integer.MIN_VALUE)
+        && !options.getFetchSize().equals(0)) {
+      LOG.info("Argument '--fetch-size " + options.getFetchSize()
+          + "' will probably get ignored by MySQL JDBC driver.");
+      // see also
+      // http://dev.mysql.com/doc/refman/5.5/en
+      //                       /connector-j-reference-implementation-notes.html
+    }
   }
 
   @Override

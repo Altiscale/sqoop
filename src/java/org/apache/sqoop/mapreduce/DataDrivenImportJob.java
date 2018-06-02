@@ -23,16 +23,16 @@ import java.io.IOException;
 import java.sql.SQLException;
 
 import org.apache.avro.Schema;
-import org.apache.avro.generic.GenericData;
-import org.apache.avro.generic.GenericRecord;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.LongWritable;
 import org.apache.hadoop.io.NullWritable;
 import org.apache.hadoop.io.Text;
+import org.apache.hadoop.mapred.JobConf;
 import org.apache.hadoop.mapreduce.InputFormat;
 import org.apache.hadoop.mapreduce.Job;
 import org.apache.hadoop.mapreduce.Mapper;
@@ -49,6 +49,8 @@ import com.cloudera.sqoop.mapreduce.ImportJobBase;
 import com.cloudera.sqoop.mapreduce.db.DBConfiguration;
 import com.cloudera.sqoop.mapreduce.db.DataDrivenDBInputFormat;
 import com.cloudera.sqoop.orm.AvroSchemaGenerator;
+import org.apache.sqoop.util.FileSystemUtil;
+import org.kitesdk.data.Datasets;
 import org.kitesdk.data.mapreduce.DatasetKeyOutputFormat;
 
 /**
@@ -88,7 +90,8 @@ public class DataDrivenImportJob extends ImportJobBase {
       job.setOutputValueClass(NullWritable.class);
     } else if (options.getFileLayout()
         == SqoopOptions.FileLayout.AvroDataFile) {
-      Schema schema = generateAvroSchema(tableName);
+      final String schemaNameOverride = null;
+      Schema schema = generateAvroSchema(tableName, schemaNameOverride);
       try {
         writeAvroSchema(schema);
       } catch (final IOException e) {
@@ -98,28 +101,59 @@ public class DataDrivenImportJob extends ImportJobBase {
       AvroJob.setMapOutputSchema(job.getConfiguration(), schema);
     } else if (options.getFileLayout()
         == SqoopOptions.FileLayout.ParquetFile) {
-      Configuration conf = job.getConfiguration();
-      // An Avro schema is required for creating a dataset that manages
-      // Parquet data records. The import will fail, if schema is invalid.
-      Schema schema = generateAvroSchema(tableName);
-      String uri;
+      JobConf conf = (JobConf)job.getConfiguration();
+      // Kite SDK requires an Avro schema to represent the data structure of
+      // target dataset. If the schema name equals to generated java class name,
+      // the import will fail. So we use table name as schema name and add a
+      // prefix "codegen_" to generated java class to avoid the conflict.
+      final String schemaNameOverride = tableName;
+      Schema schema = generateAvroSchema(tableName, schemaNameOverride);
+      String uri = getKiteUri(conf, tableName);
+      ParquetJob.WriteMode writeMode;
+
       if (options.doHiveImport()) {
-        uri = "dataset:hive?dataset=" + options.getTableName();
+        if (options.doOverwriteHiveTable()) {
+          writeMode = ParquetJob.WriteMode.OVERWRITE;
+        } else {
+          writeMode = ParquetJob.WriteMode.APPEND;
+          if (Datasets.exists(uri)) {
+            LOG.warn("Target Hive table '" + tableName + "' exists! Sqoop will " +
+                "append data into the existing Hive table. Consider using " +
+                "--hive-overwrite, if you do NOT intend to do appending.");
+          }
+        }
       } else {
-        FileSystem fs = FileSystem.get(conf);
-        uri = "dataset:" + fs.makeQualified(getContext().getDestination());
+        // Note that there is no such an import argument for overwriting HDFS
+        // dataset, so overwrite mode is not supported yet.
+        // Sqoop's append mode means to merge two independent datasets. We
+        // choose DEFAULT as write mode.
+        writeMode = ParquetJob.WriteMode.DEFAULT;
       }
-      ParquetJob.configureImportJob(conf, schema, uri, options.isAppendMode());
+      ParquetJob.configureImportJob(conf, schema, uri, writeMode);
     }
 
     job.setMapperClass(getMapperClass());
   }
 
-  private Schema generateAvroSchema(String tableName) throws IOException {
+  private String getKiteUri(Configuration conf, String tableName) throws IOException {
+    if (options.doHiveImport()) {
+      String hiveDatabase = options.getHiveDatabaseName() == null ? "default" :
+          options.getHiveDatabaseName();
+      String hiveTable = options.getHiveTableName() == null ? tableName :
+          options.getHiveTableName();
+      return String.format("dataset:hive:/%s/%s", hiveDatabase, hiveTable);
+    } else {
+      Path destination = getContext().getDestination();
+      return "dataset:" + FileSystemUtil.makeQualified(destination, conf);
+    }
+  }
+
+  private Schema generateAvroSchema(String tableName,
+      String schemaNameOverride) throws IOException {
     ConnManager connManager = getContext().getConnManager();
     AvroSchemaGenerator generator = new AvroSchemaGenerator(options,
         connManager, tableName);
-    return generator.generate();
+    return generator.generate(schemaNameOverride);
   }
 
   private void writeAvroSchema(final Schema schema) throws IOException {
@@ -288,6 +322,11 @@ public class DataDrivenImportJob extends ImportJobBase {
 
       job.getConfiguration().setLong(LargeObjectLoader.MAX_INLINE_LOB_LEN_KEY,
           options.getInlineLobLimit());
+
+      if (options.getSplitLimit() != null) {
+        org.apache.sqoop.config.ConfigurationHelper.setSplitLimit(
+          job.getConfiguration(), options.getSplitLimit());
+      }
 
       LOG.debug("Using InputFormat: " + inputFormatClass);
       job.setInputFormatClass(inputFormatClass);

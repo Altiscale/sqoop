@@ -18,6 +18,17 @@
 
 package org.apache.sqoop.hbase;
 
+import com.cloudera.sqoop.hbase.PutTransformer;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hbase.client.Delete;
+import org.apache.hadoop.hbase.client.Mutation;
+import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.util.StringUtils;
+import org.apache.sqoop.mapreduce.ImportJobBase;
+
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.util.ArrayList;
@@ -27,13 +38,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.client.Put;
-import org.apache.hadoop.hbase.util.Bytes;
-import org.apache.hadoop.util.StringUtils;
-
-import com.cloudera.sqoop.hbase.PutTransformer;
+import static org.apache.sqoop.hbase.HBasePutProcessor.ADD_ROW_KEY;
+import static org.apache.sqoop.hbase.HBasePutProcessor.ADD_ROW_KEY_DEFAULT;
+import static org.apache.sqoop.hbase.HBasePutProcessor.COL_FAMILY_KEY;
+import static org.apache.sqoop.hbase.HBasePutProcessor.ROW_KEY_COLUMN_KEY;
 
 /**
  * PutTransformer that calls toString on all non-null fields.
@@ -100,7 +108,7 @@ public class ToStringPutTransformer extends PutTransformer {
 
   @Override
   /** {@inheritDoc} */
-  public List<Put> getPutCommand(Map<String, Object> fields)
+  public List<Mutation> getMutationCommand(Map<String, Object> fields)
       throws IOException {
 
     String rowKeyCol = getRowKeyColumn();
@@ -134,7 +142,7 @@ public class ToStringPutTransformer extends PutTransformer {
       // from composite key
       String compositeRowKey = StringUtils.join(DELIMITER_HBASE, rowKeyList);
       // Insert record in HBase
-      return putRecordInHBase(fields, colFamily, compositeRowKey);
+      return mutationRecordInHBase(fields, colFamily, compositeRowKey);
 
     } else {
       // if row-key is regular primary key
@@ -148,23 +156,21 @@ public class ToStringPutTransformer extends PutTransformer {
       }
 
       String hBaseRowKey = toHBaseString(rowKey);
-      return putRecordInHBase(fields, colFamily, hBaseRowKey);
+      return mutationRecordInHBase(fields, colFamily, hBaseRowKey);
    }
  }
 
   /**
-   * Performs actual Put operation for the specified record in HBase.
+   * Performs actual Put/delete operation for the specified record in HBase.
    * @param record
    * @param colFamily
    * @param rowKey
-   * @return List containing a single put command
+   * @return List containing a put/delete command
    */
-  private List<Put> putRecordInHBase(Map<String, Object> record,
+  private List<Mutation> mutationRecordInHBase(Map<String, Object> record,
     String colFamily, String rowKey) {
-    // Put row-key in HBase
-    Put put = new Put(Bytes.toBytes(rowKey));
     byte[] colFamilyBytes = Bytes.toBytes(colFamily);
-
+    List<Mutation> mutationList = new ArrayList<Mutation>();
     for (Map.Entry<String, Object> fieldEntry : record.entrySet()) {
       String colName = fieldEntry.getKey();
       boolean rowKeyCol = false;
@@ -181,17 +187,24 @@ public class ToStringPutTransformer extends PutTransformer {
         // check addRowKey flag before including rowKey field.
         Object val = fieldEntry.getValue();
         if (null != val) {
+          // Put row-key in HBase
+          Put put = new Put(Bytes.toBytes(rowKey));
           if ( val instanceof byte[]) {
-            put.add(colFamilyBytes, getFieldNameBytes(colName),
+            put.addColumn(colFamilyBytes, getFieldNameBytes(colName),
                 (byte[])val);
           } else {
-	          put.add(colFamilyBytes, getFieldNameBytes(colName),
+	          put.addColumn(colFamilyBytes, getFieldNameBytes(colName),
 	              Bytes.toBytes(toHBaseString(val)));
           }
+          mutationList.add(put);
+        } else {
+            Delete delete = new Delete(Bytes.toBytes(rowKey));
+            delete.addColumn(colFamilyBytes, getFieldNameBytes(colName));
+            mutationList.add(delete);
         }
       }
     }
-    return Collections.singletonList(put);
+    return Collections.unmodifiableList(mutationList);
   }
 
   private String toHBaseString(Object val) {
@@ -204,4 +217,14 @@ public class ToStringPutTransformer extends PutTransformer {
     return valString;
   }
 
+  @Override
+  public void init(Configuration conf) {
+    setColumnFamily(conf.get(COL_FAMILY_KEY, null));
+    setRowKeyColumn(conf.get(ROW_KEY_COLUMN_KEY, null));
+
+    this.bigDecimalFormatString = conf.getBoolean(ImportJobBase.PROPERTY_BIGDECIMAL_FORMAT,
+              ImportJobBase.PROPERTY_BIGDECIMAL_FORMAT_DEFAULT);
+    this.addRowKey = conf.getBoolean(ADD_ROW_KEY, ADD_ROW_KEY_DEFAULT);
+    detectCompositeKey();
+  }
 }

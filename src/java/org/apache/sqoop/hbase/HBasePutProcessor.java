@@ -18,24 +18,24 @@
 
 package org.apache.sqoop.hbase;
 
-import java.io.Closeable;
-import java.io.IOException;
-import java.util.List;
-import java.util.Map;
-
+import com.cloudera.sqoop.lib.FieldMapProcessor;
+import com.cloudera.sqoop.lib.FieldMappable;
+import com.cloudera.sqoop.lib.ProcessingException;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configurable;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hbase.client.Delete;
 import org.apache.hadoop.hbase.client.HTable;
+import org.apache.hadoop.hbase.client.Mutation;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.util.ReflectionUtils;
-import org.apache.sqoop.mapreduce.ImportJobBase;
 
-import com.cloudera.sqoop.lib.FieldMappable;
-import com.cloudera.sqoop.lib.FieldMapProcessor;
-import com.cloudera.sqoop.lib.ProcessingException;
+import java.io.Closeable;
+import java.io.IOException;
+import java.util.List;
+import java.util.Map;
 
 /**
  * SqoopRecordProcessor that performs an HBase "put" operation
@@ -105,21 +105,7 @@ public class HBasePutProcessor implements Closeable, Configurable,
     if (null == putTransformer) {
       throw new RuntimeException("Could not instantiate PutTransformer.");
     }
-
-    this.putTransformer.setColumnFamily(conf.get(COL_FAMILY_KEY, null));
-    this.putTransformer.setRowKeyColumn(conf.get(ROW_KEY_COLUMN_KEY, null));
-
-    if (this.putTransformer instanceof ToStringPutTransformer) {
-      ToStringPutTransformer stringPutTransformer =
-          (ToStringPutTransformer) this.putTransformer;
-      stringPutTransformer.bigDecimalFormatString =
-          conf.getBoolean(ImportJobBase.PROPERTY_BIGDECIMAL_FORMAT,
-              ImportJobBase.PROPERTY_BIGDECIMAL_FORMAT_DEFAULT);
-      stringPutTransformer.addRowKey =
-          conf.getBoolean(HBasePutProcessor.ADD_ROW_KEY,
-              HBasePutProcessor.ADD_ROW_KEY_DEFAULT);
-      stringPutTransformer.detectCompositeKey();
-    }
+    putTransformer.init(conf);
 
     this.tableName = conf.get(TABLE_NAME_KEY, null);
     try {
@@ -144,17 +130,27 @@ public class HBasePutProcessor implements Closeable, Configurable,
   public void accept(FieldMappable record)
       throws IOException, ProcessingException {
     Map<String, Object> fields = record.getFieldMap();
-
-    List<Put> putList = putTransformer.getPutCommand(fields);
-    if (null != putList) {
-      for (Put put : putList) {
-        if (put!=null) {
-          if (put.isEmpty()) {
-            LOG.warn("Could not insert row with no columns "
-                + "for row-key column: " + Bytes.toString(put.getRow()));
-          } else {
-            this.table.put(put);
-          }
+    List<Mutation> mutationList = putTransformer.getMutationCommand(fields);
+    if (null != mutationList) {
+      for (Mutation mutation : mutationList) {
+        if (mutation!=null) {
+            if(mutation instanceof Put) {
+              Put putObject = (Put) mutation;
+              if (putObject.isEmpty()) {
+                LOG.warn("Could not insert row with no columns "
+                      + "for row-key column: " + Bytes.toString(putObject.getRow()));
+                } else {
+                  this.table.put(putObject);
+                }
+              } else if(mutation instanceof Delete) {
+                Delete deleteObject = (Delete) mutation;
+                if (deleteObject.isEmpty()) {
+                  LOG.warn("Could not delete row with no columns "
+                        + "for row-key column: " + Bytes.toString(deleteObject.getRow()));
+                } else {
+                  this.table.delete(deleteObject);
+                }
+            }
         }
       }
     }

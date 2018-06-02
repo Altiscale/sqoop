@@ -21,14 +21,19 @@ package org.apache.sqoop.mapreduce.db.netezza;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.sql.Connection;
 import java.sql.SQLException;
 
+import org.apache.commons.io.IOUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileStatus;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.NullWritable;
 import org.apache.hadoop.io.Text;
 import org.apache.sqoop.config.ConfigurationHelper;
@@ -36,6 +41,7 @@ import org.apache.sqoop.io.NamedFifo;
 import org.apache.sqoop.lib.DelimiterSet;
 import org.apache.sqoop.manager.DirectNetezzaManager;
 import org.apache.sqoop.mapreduce.db.DBConfiguration;
+import org.apache.sqoop.util.FileUploader;
 import org.apache.sqoop.util.PerfCounters;
 import org.apache.sqoop.util.TaskId;
 
@@ -61,7 +67,7 @@ public abstract class NetezzaExternalTableImportMapper<K, V> extends
     .getLog(NetezzaExternalTableImportMapper.class.getName());
   private NetezzaJDBCStatementRunner extTableThread;
   private PerfCounters counter;
-
+  private File taskAttemptDir = null;
   private String getSqlStatement(int myId) throws IOException {
 
     char fd = (char) conf.getInt(DelimiterSet.OUTPUT_FIELD_DELIM_KEY, ',');
@@ -70,10 +76,11 @@ public abstract class NetezzaExternalTableImportMapper<K, V> extends
 
     String nullValue = conf.get(DirectNetezzaManager.NETEZZA_NULL_VALUE);
 
+
     int errorThreshold = conf.getInt(
       DirectNetezzaManager.NETEZZA_ERROR_THRESHOLD_OPT, 1);
     String logDir = conf.get(DirectNetezzaManager.NETEZZA_LOG_DIR_OPT);
-    String[] cols = dbc.getOutputFieldNames();
+    String[] cols = dbc.getInputFieldNames();
     String inputConds = dbc.getInputConditions();
     StringBuilder sqlStmt = new StringBuilder(2048);
 
@@ -112,25 +119,13 @@ public abstract class NetezzaExternalTableImportMapper<K, V> extends
 
     sqlStmt.append(" MAXERRORS ").append(errorThreshold);
 
-    if (logDir != null) {
-      logDir = logDir.trim();
-      if (logDir.length() > 0) {
-        File logDirPath = new File(logDir);
-        logDirPath.mkdirs();
-        if (logDirPath.canWrite() && logDirPath.isDirectory()) {
-          sqlStmt.append(" LOGDIR ").append(logDir).append(' ');
-        } else {
-          throw new IOException("Unable to create log directory specified");
-        }
-      }
-    }
 
     sqlStmt.append(") AS SELECT ");
     if (cols == null || cols.length == 0) {
       sqlStmt.append('*');
     } else {
       sqlStmt.append(cols[0]).append(' ');
-      for (int i = 0; i < cols.length; ++i) {
+      for (int i = 1; i < cols.length; ++i) {
         sqlStmt.append(',').append(cols[i]);
       }
     }
@@ -149,7 +144,7 @@ public abstract class NetezzaExternalTableImportMapper<K, V> extends
 
   private void initNetezzaExternalTableImport(int myId) throws IOException {
 
-    File taskAttemptDir = TaskId.getLocalWorkPath(conf);
+    taskAttemptDir = TaskId.getLocalWorkPath(conf);
 
     this.fifoFile = new File(taskAttemptDir, ("nzexttable-" + myId + ".txt"));
     String filename = fifoFile.toString();
@@ -189,8 +184,10 @@ public abstract class NetezzaExternalTableImportMapper<K, V> extends
     extTableThread.start();
     // We need to start the reader end first
 
+    final String encoding = conf
+        .get(DirectNetezzaManager.NETEZZA_TABLE_ENCODING_OPT);
     recordReader = new BufferedReader(new InputStreamReader(
-      new FileInputStream(nf.getFile())));
+      new FileInputStream(nf.getFile()), (null == encoding ? "UTF-8" : encoding)));
   }
 
   abstract protected void writeRecord(Text text, Context context)
@@ -199,6 +196,8 @@ public abstract class NetezzaExternalTableImportMapper<K, V> extends
   public void map(Integer dataSliceId, NullWritable val, Context context)
     throws IOException, InterruptedException {
     conf = context.getConfiguration();
+
+
     dbc = new DBConfiguration(conf);
     numMappers = ConfigurationHelper.getConfNumMaps(conf);
     char rd = (char) conf.getInt(DelimiterSet.OUTPUT_RECORD_DELIM_KEY, '\n');
@@ -235,4 +234,5 @@ public abstract class NetezzaExternalTableImportMapper<K, V> extends
       }
     }
   }
+
 }

@@ -41,6 +41,10 @@ import com.cloudera.sqoop.testutil.CommonArgs;
 import com.cloudera.sqoop.testutil.ImportJobTestCase;
 import com.cloudera.sqoop.util.FileListing;
 
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+
 /**
  * Test the DirectMySQLManager implementation.
  * This differs from MySQLManager only in its importTable() method, which
@@ -71,6 +75,7 @@ public class DirectMySQLTest extends ImportJobTestCase {
 
   // instance variables populated during setUp, used during tests
   private DirectMySQLManager manager;
+  private MySQLTestUtils mySQLTestUtils = new MySQLTestUtils();
 
   @Override
   protected String getTablePrefix() {
@@ -81,12 +86,13 @@ public class DirectMySQLTest extends ImportJobTestCase {
   public void setUp() {
     super.setUp();
 
-    SqoopOptions options = new SqoopOptions(MySQLTestUtils.CONNECT_STRING,
+    SqoopOptions options = new SqoopOptions(mySQLTestUtils.getMySqlConnectString(),
         getTableName());
-    options.setUsername(MySQLTestUtils.getCurrentUser());
+    options.setUsername(mySQLTestUtils.getUserName());
+    mySQLTestUtils.addPasswordIfIsSet(options);
 
     LOG.debug("Setting up another DirectMySQLTest: "
-        + MySQLTestUtils.CONNECT_STRING);
+        + mySQLTestUtils.getMySqlConnectString());
 
     manager = new DirectMySQLManager(options);
 
@@ -119,34 +125,19 @@ public class DirectMySQLTest extends ImportJobTestCase {
       LOG.error("Encountered SQL Exception: " + sqlE);
       sqlE.printStackTrace();
       fail("SQLException when running test setUp(): " + sqlE);
-    } finally {
-      try {
-        if (null != st) {
-          st.close();
-        }
-
-        if (null != connection) {
-          connection.close();
-        }
-      } catch (SQLException sqlE) {
-        LOG.warn("Got SQLException when closing connection: " + sqlE);
-      }
     }
   }
 
   @After
   public void tearDown() {
-    super.tearDown();
-
-    if (null != manager) {
-      try {
-        manager.close();
-        manager = null;
-      } catch (SQLException sqlE) {
-        LOG.error("Got SQLException: " + sqlE.toString());
-        fail("Got SQLException: " + sqlE.toString());
-      }
+    try {
+      Statement stmt = manager.getConnection().createStatement();
+      stmt.execute("DROP TABLE " + getTableName());
+    } catch(SQLException e) {
+      LOG.error("Can't clean up the database:", e);
     }
+
+    super.tearDown();
   }
 
   private String [] getArgv(boolean mysqlOutputDelims, boolean isDirect,
@@ -160,12 +151,13 @@ public class DirectMySQLTest extends ImportJobTestCase {
     args.add("--warehouse-dir");
     args.add(getWarehouseDir());
     args.add("--connect");
-    args.add(MySQLTestUtils.CONNECT_STRING);
+    args.add(mySQLTestUtils.getMySqlConnectString());
     if (isDirect) {
       args.add("--direct");
     }
     args.add("--username");
-    args.add(MySQLTestUtils.getCurrentUser());
+    args.add(mySQLTestUtils.getUserName());
+    mySQLTestUtils.addPasswordIfIsSet(args);
     args.add("--where");
     args.add("id > 1");
     args.add("--num-mappers");
@@ -318,9 +310,10 @@ public class DirectMySQLTest extends ImportJobTestCase {
     // Test a JDBC-based import of a table whose name is
     // a reserved sql keyword (and is thus `quoted`)
     final String RESERVED_TABLE_NAME = "TABLE";
-    SqoopOptions options = new SqoopOptions(MySQLTestUtils.CONNECT_STRING,
+    SqoopOptions options = new SqoopOptions(mySQLTestUtils.getMySqlConnectString(),
         RESERVED_TABLE_NAME);
-    options.setUsername(MySQLTestUtils.getCurrentUser());
+    options.setUsername(mySQLTestUtils.getUserName());
+    mySQLTestUtils.addPasswordIfIsSet(options);
     ConnManager mgr = new MySQLManager(options);
 
     Connection connection = null;
@@ -342,7 +335,17 @@ public class DirectMySQLTest extends ImportJobTestCase {
 
       st.executeUpdate("INSERT INTO `" + RESERVED_TABLE_NAME + "` VALUES("
           + "2,'Aaron','2009-05-14',1000000.00,'engineering')");
+      st.close();
       connection.commit();
+
+      String [] expectedResults = {
+          "2,Aaron,2009-05-14,1000000.0,engineering",
+      };
+
+      doImport(false, false, RESERVED_TABLE_NAME, expectedResults, null);
+
+      st = connection.createStatement();
+      st.execute("DROP TABLE `" + RESERVED_TABLE_NAME + "`");
     } finally {
       if (null != st) {
         st.close();
@@ -353,11 +356,6 @@ public class DirectMySQLTest extends ImportJobTestCase {
       }
     }
 
-    String [] expectedResults = {
-        "2,Aaron,2009-05-14,1000000.0,engineering",
-    };
-
-    doImport(false, false, RESERVED_TABLE_NAME, expectedResults, null);
   }
 
   @Test
@@ -365,10 +363,10 @@ public class DirectMySQLTest extends ImportJobTestCase {
     // Test a JDBC-based import of a table with a column whose name is
     // a reserved sql keyword (and is thus `quoted`).
     final String TABLE_NAME = "mysql_escaped_col_table";
-    setCurTableName(TABLE_NAME);
-    SqoopOptions options = new SqoopOptions(MySQLTestUtils.CONNECT_STRING,
+    SqoopOptions options = new SqoopOptions(mySQLTestUtils.getMySqlConnectString(),
         TABLE_NAME);
-    options.setUsername(MySQLTestUtils.getCurrentUser());
+    options.setUsername(mySQLTestUtils.getUserName());
+    mySQLTestUtils.addPasswordIfIsSet(options);
     ConnManager mgr = new MySQLManager(options);
 
     Connection connection = null;
@@ -390,7 +388,17 @@ public class DirectMySQLTest extends ImportJobTestCase {
 
       st.executeUpdate("INSERT INTO " + TABLE_NAME + " VALUES("
           + "2,'Aaron','2009-05-14',1000000.00,'engineering')");
+      st.close();
       connection.commit();
+
+      String [] expectedResults = {
+          "2,Aaron,2009-05-14,1000000.0,engineering",
+      };
+
+      doImport(false, false, TABLE_NAME, expectedResults, null);
+
+      st = connection.createStatement();
+      st.execute("DROP TABLE " + TABLE_NAME);
     } finally {
       if (null != st) {
         st.close();
@@ -400,11 +408,5 @@ public class DirectMySQLTest extends ImportJobTestCase {
         connection.close();
       }
     }
-
-    String [] expectedResults = {
-        "2,Aaron,2009-05-14,1000000.0,engineering",
-    };
-
-    doImport(false, false, TABLE_NAME, expectedResults, null);
   }
 }

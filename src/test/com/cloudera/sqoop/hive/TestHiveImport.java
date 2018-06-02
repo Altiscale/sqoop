@@ -20,23 +20,32 @@ package com.cloudera.sqoop.hive;
 
 import java.io.BufferedReader;
 import java.io.File;
-import java.io.FileNotFoundException;
 import java.io.FileReader;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 
+import com.cloudera.sqoop.Sqoop;
+
+import org.apache.avro.Schema;
+import org.apache.avro.SchemaBuilder;
+import org.apache.avro.generic.GenericRecord;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.sqoop.avro.AvroSchemaMismatchException;
+import org.apache.sqoop.mapreduce.ParquetJob;
+import org.junit.After;
+import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 
 import com.cloudera.sqoop.SqoopOptions;
 import com.cloudera.sqoop.SqoopOptions.InvalidOptionsException;
 import com.cloudera.sqoop.testutil.CommonArgs;
-import com.cloudera.sqoop.testutil.HsqldbTestServer;
 import com.cloudera.sqoop.testutil.ImportJobTestCase;
 import com.cloudera.sqoop.tool.BaseSqoopTool;
 import com.cloudera.sqoop.tool.CodeGenTool;
@@ -44,20 +53,37 @@ import com.cloudera.sqoop.tool.CreateHiveTableTool;
 import com.cloudera.sqoop.tool.ImportTool;
 import com.cloudera.sqoop.tool.SqoopTool;
 import org.apache.commons.cli.ParseException;
+import org.junit.rules.ExpectedException;
+import org.kitesdk.data.Dataset;
+import org.kitesdk.data.DatasetReader;
+import org.kitesdk.data.Datasets;
+import org.kitesdk.data.Formats;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 /**
  * Test HiveImport capability after an import to HDFS.
  */
+
 public class TestHiveImport extends ImportJobTestCase {
 
   public static final Log LOG = LogFactory.getLog(
       TestHiveImport.class.getName());
 
+  @Rule
+  public ExpectedException thrown = ExpectedException.none();
+
+  @Before
   public void setUp() {
     super.setUp();
     HiveImport.setTestMode(true);
   }
 
+  @After
   public void tearDown() {
     super.tearDown();
     HiveImport.setTestMode(false);
@@ -78,7 +104,7 @@ public class TestHiveImport extends ImportJobTestCase {
     setColNames(cols);
   }
 
-  protected String[] getTypesNewLineTest() {
+  protected String[] getTypes() {
     String[] types = { "VARCHAR(32)", "INTEGER", "CHAR(64)" };
     return types;
   }
@@ -250,7 +276,6 @@ public class TestHiveImport extends ImportJobTestCase {
     assertFalse("Import actually happened!", fs.exists(hiveImportPath));
   }
 
-
   /** Test that strings and ints are handled in the normal fashion. */
   @Test
   public void testNormalHiveImport() throws IOException {
@@ -270,13 +295,49 @@ public class TestHiveImport extends ImportJobTestCase {
     final String TABLE_NAME = "NORMAL_HIVE_IMPORT_AS_PARQUET";
     setCurTableName(TABLE_NAME);
     setNumCols(3);
-    String [] types = { "VARCHAR(32)", "INTEGER", "CHAR(64)" };
+    String [] types = getTypes();
     String [] vals = { "'test'", "42", "'somestring'" };
-    String [] args_array = getArgv(false, null);
-    ArrayList<String> args = new ArrayList<String>(Arrays.asList(args_array));
-    args.add("--as-parquetfile");
-    runImportTest(TABLE_NAME, types, vals, "normalImportAsParquet.q", args.toArray(new String[0]),
-            new ImportTool());
+    String [] extraArgs = {"--as-parquetfile"};
+
+    runImportTest(TABLE_NAME, types, vals, "", getArgv(false, extraArgs),
+        new ImportTool());
+    verifyHiveDataset(TABLE_NAME, new Object[][]{{"test", 42, "somestring"}});
+  }
+
+  private void verifyHiveDataset(String tableName, Object[][] valsArray) {
+    String datasetUri = String.format("dataset:hive:default/%s",
+        tableName.toLowerCase());
+    assertTrue(Datasets.exists(datasetUri));
+    Dataset dataset = Datasets.load(datasetUri);
+    assertFalse(dataset.isEmpty());
+
+    DatasetReader<GenericRecord> reader = dataset.newReader();
+    try {
+      List<String> expectations = new ArrayList<String>();
+      if (valsArray != null) {
+        for (Object[] vals : valsArray) {
+          expectations.add(Arrays.toString(vals));
+        }
+      }
+
+      while (reader.hasNext() && expectations.size() > 0) {
+        String actual = Arrays.toString(
+            convertGenericRecordToArray(reader.next()));
+        assertTrue("Expect record: " + actual, expectations.remove(actual));
+      }
+      assertFalse(reader.hasNext());
+      assertEquals(0, expectations.size());
+    } finally {
+      reader.close();
+    }
+  }
+
+  private static Object[] convertGenericRecordToArray(GenericRecord record) {
+    Object[] result = new Object[record.getSchema().getFields().size()];
+    for (int i = 0; i < result.length; i++) {
+      result[i] = record.get(i);
+    }
+    return result;
   }
 
   /** Test that table is created in hive with no data import. */
@@ -307,7 +368,112 @@ public class TestHiveImport extends ImportJobTestCase {
     runImportTest(TABLE_NAME, types, vals,
         "createOverwriteImport.q", getCreateHiveTableArgs(extraArgs),
         new CreateHiveTableTool());
+    runImportTest(TABLE_NAME, types, vals,
+        "createOverwriteImport.q", getCreateHiveTableArgs(extraArgs),
+        new CreateHiveTableTool());
   }
+
+  /**
+   * Test that table is created in hive and replaces the existing table if
+   * any.
+   */
+  @Test
+  public void testCreateOverwriteHiveImportAsParquet() throws IOException {
+    final String TABLE_NAME = "CREATE_OVERWRITE_HIVE_IMPORT_AS_PARQUET";
+    setCurTableName(TABLE_NAME);
+    setNumCols(3);
+    String [] types = getTypes();
+    String [] vals = { "'test'", "42", "'somestring'" };
+    String [] extraArgs = {"--as-parquetfile"};
+    ImportTool tool = new ImportTool();
+
+    runImportTest(TABLE_NAME, types, vals, "", getArgv(false, extraArgs), tool);
+    verifyHiveDataset(TABLE_NAME, new Object[][]{{"test", 42, "somestring"}});
+
+    String [] valsToOverwrite = { "'test2'", "24", "'somestring2'" };
+    String [] extraArgsForOverwrite = {"--as-parquetfile", "--hive-overwrite"};
+    runImportTest(TABLE_NAME, types, valsToOverwrite, "",
+        getArgv(false, extraArgsForOverwrite), tool);
+    verifyHiveDataset(TABLE_NAME, new Object[][] {{"test2", 24, "somestring2"}});
+  }
+
+  @Test
+  public void testHiveImportAsParquetWhenTableExistsWithIncompatibleSchema() throws Exception {
+    final String TABLE_NAME = "HIVE_IMPORT_AS_PARQUET_EXISTING_TABLE";
+    setCurTableName(TABLE_NAME);
+    setNumCols(3);
+
+    String [] types = { "VARCHAR(32)", "INTEGER", "DATE" };
+    String [] vals = { "'test'", "42", "'2009-12-31'" };
+    String [] extraArgs = {"--as-parquetfile"};
+
+    createHiveDataSet(TABLE_NAME);
+
+    createTableWithColTypes(types, vals);
+
+    thrown.expect(AvroSchemaMismatchException.class);
+    thrown.expectMessage(ParquetJob.INCOMPATIBLE_AVRO_SCHEMA_MSG + ParquetJob.HIVE_INCOMPATIBLE_AVRO_SCHEMA_MSG);
+
+    SqoopOptions sqoopOptions = getSqoopOptions(getConf());
+    sqoopOptions.setThrowOnError(true);
+    Sqoop sqoop = new Sqoop(new ImportTool(), getConf(), sqoopOptions);
+    sqoop.run(getArgv(false, extraArgs));
+
+  }
+
+  private void createHiveDataSet(String tableName) {
+    Schema dataSetSchema = SchemaBuilder
+        .record(tableName)
+            .fields()
+            .name(getColName(0)).type().nullable().stringType().noDefault()
+            .name(getColName(1)).type().nullable().stringType().noDefault()
+            .name(getColName(2)).type().nullable().stringType().noDefault()
+            .endRecord();
+    String dataSetUri = "dataset:hive:/default/" + tableName;
+    ParquetJob.createDataset(dataSetSchema, Formats.PARQUET.getDefaultCompressionType(), dataSetUri);
+  }
+
+  /**
+   * Test that records are appended to an existing table.
+   */
+  @Test
+  public void testAppendHiveImportAsParquet() throws IOException {
+    final String TABLE_NAME = "APPEND_HIVE_IMPORT_AS_PARQUET";
+    setCurTableName(TABLE_NAME);
+    setNumCols(3);
+    String [] types = getTypes();
+    String [] vals = { "'test'", "42", "'somestring'" };
+    String [] extraArgs = {"--as-parquetfile"};
+    String [] args = getArgv(false, extraArgs);
+    ImportTool tool = new ImportTool();
+
+    runImportTest(TABLE_NAME, types, vals, "", args, tool);
+    verifyHiveDataset(TABLE_NAME, new Object[][]{{"test", 42, "somestring"}});
+
+    String [] valsToAppend = { "'test2'", "4242", "'somestring2'" };
+    runImportTest(TABLE_NAME, types, valsToAppend, "", args, tool);
+    verifyHiveDataset(TABLE_NAME, new Object[][] {
+        {"test2", 4242, "somestring2"}, {"test", 42, "somestring"}});
+  }
+
+  /**
+   * Test hive create and --as-parquetfile options validation.
+   */
+  @Test
+  public void testCreateHiveImportAsParquet() throws ParseException, InvalidOptionsException {
+    final String TABLE_NAME = "CREATE_HIVE_IMPORT_AS_PARQUET";
+    setCurTableName(TABLE_NAME);
+    setNumCols(3);
+    String [] extraArgs = {"--as-parquetfile", "--create-hive-table"};
+    ImportTool tool = new ImportTool();
+
+    thrown.expect(InvalidOptionsException.class);
+    thrown.reportMissingExceptionWithMessage("Expected InvalidOptionsException during Hive table creation with " +
+        "--as-parquetfile");
+    tool.validateOptions(tool.parseArguments(getArgv(false, extraArgs), null,
+        null, true));
+  }
+
 
   /** Test that dates are coerced properly to strings. */
   @Test
@@ -333,9 +499,26 @@ public class TestHiveImport extends ImportJobTestCase {
         getArgv(false, null), new ImportTool());
   }
 
+  /** Test that DECIMALS using --map-column-hive option maps can run without issues. */
+  @Test
+  public void testDecimalMapColumnHive() throws IOException {
+    final String TABLE_NAME = "DECIMAL_MAP_HIVE_IMPORT";
+    setCurTableName(TABLE_NAME);
+    setNumCols(2);
+    String [] types = { "NUMERIC", "CHAR(64)" };
+    String [] vals = { "12343.14159", "'foo'" };
+
+    ArrayList<String> args = new ArrayList<String>();
+    args.add("--map-column-hive");
+    args.add(BASE_COL_NAME  + "0=DECIMAL(10,10)");
+
+    runImportTest(TABLE_NAME, types, vals, "decimalMapImport.q",
+        getArgv(false, args.toArray(new String[args.size()])), new ImportTool());
+  }
+
   /** If bin/hive returns an error exit status, we should get an IOException. */
   @Test
-  public void testHiveExitFails() {
+  public void testHiveExitFails() throws IOException {
     // The expected script is different than the one which would be generated
     // by this, so we expect an IOException out.
     final String TABLE_NAME = "FAILING_HIVE_IMPORT";
@@ -343,14 +526,11 @@ public class TestHiveImport extends ImportJobTestCase {
     setNumCols(2);
     String [] types = { "NUMERIC", "CHAR(64)" };
     String [] vals = { "3.14159", "'foo'" };
-    try {
-      runImportTest(TABLE_NAME, types, vals, "failingImport.q",
-          getArgv(false, null), new ImportTool());
-      // If we get here, then the run succeeded -- which is incorrect.
-      fail("FAILING_HIVE_IMPORT test should have thrown IOException");
-    } catch (IOException ioe) {
-      // expected; ok.
-    }
+
+    thrown.expect(IOException.class);
+    thrown.reportMissingExceptionWithMessage("Expected IOException on erroneous Hive exit status");
+    runImportTest(TABLE_NAME, types, vals, "failingImport.q",
+        getArgv(false, null), new ImportTool());
   }
 
   /** Test that we can set delimiters how we want them. */
@@ -380,7 +560,7 @@ public class TestHiveImport extends ImportJobTestCase {
     LOG.info("Doing import of single row into FIELD_WITH_NL_HIVE_IMPORT table");
     setCurTableName(TABLE_NAME);
     setNumCols(3);
-    String[] types = getTypesNewLineTest();
+    String[] types = getTypes();
     String[] vals = { "'test with \n new lines \n'", "42",
         "'oh no " + '\01' + " field delims " + '\01' + "'", };
     String[] moreArgs = { "--"+ BaseSqoopTool.HIVE_DROP_DELIMS_ARG };
@@ -429,7 +609,7 @@ public class TestHiveImport extends ImportJobTestCase {
         + "FIELD_WITH_NL_REPLACEMENT_HIVE_IMPORT table");
     setCurTableName(TABLE_NAME);
     setNumCols(3);
-    String[] types = getTypesNewLineTest();
+    String[] types = getTypes();
     String[] vals = { "'test with\nnew lines\n'", "42",
         "'oh no " + '\01' + " field delims " + '\01' + "'", };
     String[] moreArgs = { "--"+BaseSqoopTool.HIVE_DELIMS_REPLACEMENT_ARG, " "};
@@ -471,7 +651,7 @@ public class TestHiveImport extends ImportJobTestCase {
    * Test hive drop and replace option validation.
    */
   @Test
-  public void testHiveDropAndReplaceOptionValidation() throws ParseException {
+  public void testHiveDropAndReplaceOptionValidation() throws ParseException, InvalidOptionsException {
     LOG.info("Testing conflicting Hive delimiter drop/replace options");
 
     setNumCols(3);
@@ -479,13 +659,12 @@ public class TestHiveImport extends ImportJobTestCase {
       "--"+BaseSqoopTool.HIVE_DROP_DELIMS_ARG, };
 
     ImportTool tool = new ImportTool();
-    try {
-      tool.validateOptions(tool.parseArguments(getArgv(false, moreArgs), null,
-          null, true));
-      fail("Expected InvalidOptionsException");
-    } catch (InvalidOptionsException ex) {
-      /* success */
-    }
+
+    thrown.expect(InvalidOptionsException.class);
+    thrown.reportMissingExceptionWithMessage("Expected InvalidOptionsException with conflicting Hive delimiter " +
+        "drop/replace options");
+    tool.validateOptions(tool.parseArguments(getArgv(false, moreArgs), null,
+        null, true));
   }
 
   /**
@@ -513,7 +692,7 @@ public class TestHiveImport extends ImportJobTestCase {
    * IOException.
    * */
   @Test
-  public void testImportWithBadPartitionKey() {
+  public void testImportWithBadPartitionKey() throws IOException {
     final String TABLE_NAME = "FAILING_PARTITION_HIVE_IMPORT";
 
     LOG.info("Doing import of single row into " + TABLE_NAME + " table");
@@ -540,30 +719,25 @@ public class TestHiveImport extends ImportJobTestCase {
     };
 
     // Test hive-import with the 1st args.
-    try {
-      runImportTest(TABLE_NAME, types, vals, "partitionImport.q",
-          getArgv(false, moreArgs1), new ImportTool());
-      fail(TABLE_NAME + " test should have thrown IOException");
-    } catch (IOException ioe) {
-      // expected; ok.
-    }
+    thrown.expect(IOException.class);
+    thrown.reportMissingExceptionWithMessage("Expected IOException during Hive import with partition key " +
+        "as importing column");
+    runImportTest(TABLE_NAME, types, vals, "partitionImport.q",
+        getArgv(false, moreArgs1), new ImportTool());
 
     // Test hive-import with the 2nd args.
-    try {
-      runImportTest(TABLE_NAME, types, vals, "partitionImport.q",
-          getArgv(false, moreArgs2), new ImportTool());
-      fail(TABLE_NAME + " test should have thrown IOException");
-    } catch (IOException ioe) {
-      // expected; ok.
-    }
+    thrown.expect(IOException.class);
+    thrown.reportMissingExceptionWithMessage("Expected IOException during Hive import with partition key " +
+        "as importing column");
+    runImportTest(TABLE_NAME, types, vals, "partitionImport.q",
+        getArgv(false, moreArgs2), new ImportTool());
 
     // Test create-hive-table with the 1st args.
-    try {
-      runImportTest(TABLE_NAME, types, vals, "partitionImport.q",
-          getCreateTableArgv(false, moreArgs1), new CreateHiveTableTool());
-      fail(TABLE_NAME + " test should have thrown IOException");
-    } catch (IOException ioe) {
-      // expected; ok.
-    }
+    thrown.expect(IOException.class);
+    thrown.reportMissingExceptionWithMessage("Expected IOException during Hive table creation with partition key " +
+        "as importing column");
+    runImportTest(TABLE_NAME, types, vals, "partitionImport.q",
+        getCreateTableArgv(false, moreArgs1), new CreateHiveTableTool());
   }
+
 }

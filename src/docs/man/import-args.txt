@@ -42,8 +42,17 @@ include::import-common-args.txt[]
 --split-by (column-name)::
   Column of the table used to split the table for parallel import
 
+--split-limit (size)::
+  Upper Limit for each split size. Optimize Integer and Date columns.
+  For date or timestamp fields it is calculated in seconds.
+
 --table (table-name)::
   The table to import
+
+--temporary-rootdir (path)::
+  Set location of temporary directory for files created during import (overrides default path "_sqoop")
+  This option only applies to the "import" command with "--append" or "--incremental lastmodified"
+  This option has the same affect as using -Dsqoop.test.import.rootDir=<path>
 
 --where (clause)::
   Import only the rows for which _clause_ is true.

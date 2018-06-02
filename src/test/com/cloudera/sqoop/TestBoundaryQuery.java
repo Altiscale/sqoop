@@ -34,6 +34,10 @@ import com.cloudera.sqoop.testutil.ImportJobTestCase;
 import com.cloudera.sqoop.testutil.SeqFileReader;
 import com.cloudera.sqoop.tool.ImportTool;
 import com.cloudera.sqoop.util.ClassLoaderStack;
+import org.junit.Test;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.fail;
 
 /**
  * Test that --boundary-query works in Sqoop.
@@ -164,15 +168,17 @@ public class TestBoundaryQuery extends ImportJobTestCase {
     }
   }
 
+  @Test
   public void testBoundaryQuery() throws IOException {
     System.out.println("PCYO");
     String query = "select min(intfield1), max(intfield1) from "
       + getTableName() +" where intfield1 in (3, 5)";
 
     runQueryTest(query, true, 2, 8, getTablePath().toString(),
-        "--split-by", "INTFIELD1");
+      "--m", "1", "--split-by", "INTFIELD1");
   }
 
+  @Test
   public void testNoBoundaryQuerySingleMapper() throws IOException {
 
       runQueryTest(null, false, 4, 16, getTablePath().toString(),
