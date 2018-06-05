@@ -2,4 +2,4 @@
 if [[ -L /opt/sqoop ]]; then 
   rm /opt/sqoop
 fi
-ln -s /opt/sqoop-${SQOOP_VERSION} /opt/sqoop
+ln -s "/opt/sqoop-$1" /opt/sqoop
