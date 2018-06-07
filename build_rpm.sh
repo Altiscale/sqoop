@@ -15,7 +15,7 @@ if [ -f ./alti-sqoop-${SQOOP_VERSION}.x86_64.rpm ]; then
 fi
 
 #create after install script
-echo "exec ./create_link.sh ${SQOOP_VERSION}" > after.sh
+echo "exec /opt/sqoop-${SQOOP_VERSION}/create_link.sh ${SQOOP_VERSION}" > after.sh
 chmod 774 after.sh
 
 export DATE_STRING=$(date "+%Y%m%d%H%M")
