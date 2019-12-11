@@ -19,7 +19,7 @@ pip install elementpath
 #
 #------------------------------------------------------------------------------
 
-SQOOP_VERSION="${PIG_VERSION:-1.4.7}"
+SQOOP_VERSION="${SQOOP_VERSION:-${XMAKE_PROJECT_VERSION}}"
 export ARTIFACT_VERSION="$SQOOP_VERSION"
 
 ant -Dhadoopversion=200 -Dskip-real-docs=true -Dbin.artifact.name=sqoop-${ARTIFACT_VERSION} clean tar
@@ -50,31 +50,32 @@ mkdir --mode=0755 -p ${RPM_BUILD_DIR}
 export RPM_CONFIG_DIR=${INSTALL_DIR}/etc/sqoop-${ARTIFACT_VERSION}
 mkdir --mode=0755 -p ${RPM_CONFIG_DIR}
 
-
 cd ${RPM_BUILD_DIR}
 tar -xvzpf ${MY_DIR}/build/sqoop-${ARTIFACT_VERSION}.tar.gz
 
-ln -s sqoop-${ARTIFACT_VERSION} sqoop
+#ln -s sqoop-${ARTIFACT_VERSION} sqoop
 
-mv sqoop/conf/* ${RPM_CONFIG_DIR}
+#mv sqoop/conf/* ${RPM_CONFIG_DIR}
 
-rm -rf sqoop/conf
+#rm -rf sqoop/conf
 
-ln -s /etc/sqoop-${ARTIFACT_VERSION} sqoop/conf 
+#ln -s /etc/sqoop-${ARTIFACT_VERSION} sqoop/conf 
 
-cd ${RPM_CONFIG_DIR}
-cd ..
-ln -s sqoop-${ARTIFACT_VERSION} sqoop
+#cd ${RPM_CONFIG_DIR}
+#cd ..
+#ln -s sqoop-${ARTIFACT_VERSION} sqoop
 
 echo "Packaging sqoop rpm with name ${RPM_NAME} with version ${ALTISCALE_RELEASE}-${DATE_STRING}"
 
 cd ${RPM_DIR}
 fpm --verbose \
 --maintainer ops@verticloud.com \
---vendor VertiCloud \
+--vendor Altiscale \
 --provides ${RPM_NAME} \
 --description "${DESCRIPTION}" \
 --replaces vcc-sqoop-${ARTIFACT_VERSION} \
+--replaces vcc-sqoop \
+--license "Apache License v2" \
 -s dir \
 -t rpm \
 -n ${RPM_NAME} \
@@ -85,6 +86,6 @@ fpm --verbose \
 -C ${INSTALL_DIR} \
 opt etc
 
-#mv "${RPM_DIR}${RPM_NAME}-${ALTISCALE_RELEASE}-${DATE_STRING}.x86_64.rpm" "${RPM_DIR}alti-sqoop-${XMAKE_PROJECT_VERSION}.rpm"
+mv "${RPM_DIR}${RPM_NAME}-${ALTISCALE_RELEASE}-${DATE_STRING}.x86_64.rpm" "${RPM_DIR}alti-sqoop-${XMAKE_PROJECT_VERSION}.rpm"
 
 exit 0
