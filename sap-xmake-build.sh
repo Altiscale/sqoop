@@ -53,20 +53,6 @@ mkdir --mode=0755 -p ${RPM_CONFIG_DIR}
 cd ${RPM_BUILD_DIR}
 tar -xvzpf ${MY_DIR}/build/sqoop-${ARTIFACT_VERSION}.tar.gz
 
-#ln -s sqoop-${ARTIFACT_VERSION} sqoop
-
-#mv sqoop/conf/* ${RPM_CONFIG_DIR}
-
-#rm -rf sqoop/conf
-
-#ln -s /etc/sqoop-${ARTIFACT_VERSION} sqoop/conf 
-
-#cd ${RPM_CONFIG_DIR}
-#cd ..
-#ln -s sqoop-${ARTIFACT_VERSION} sqoop
-
-echo "Packaging sqoop rpm with name ${RPM_NAME} with version ${ALTISCALE_RELEASE}-${DATE_STRING}"
-
 cd ${RPM_DIR}
 fpm --verbose \
 --maintainer ops@verticloud.com \
