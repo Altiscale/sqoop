@@ -31,20 +31,20 @@ under the License.
           http://ibiblio.lsu.edu/main/pub/packages/maven2
           http://www.ibiblio.net/pub/packages/maven2
   -->
-  <property name="repo.maven.org" value="http://nexus.wdf.sap.corp:8081/nexus/content/groups/build.milestones"
-      override="false"/>
+  <property name="repo.maven.org" value="http://nexus.wdf.sap.corp:8081/nexus/content/groups/build.releases"
+      override="yes"/>
   <property name="snapshot.apache.org"
-      value="https://repository.apache.org/content/repositories/snapshots/"
-      override="false"/>
+      value="http://nexus.wdf.sap.corp:8081/nexus/content/groups/build.releases"
+      override="yes"/>
   <property name="staging.cloudera.com"
-      value="https://repository.cloudera.com/content/repositories/staging/"
-      override="false"/>
+      value="http://nexus.wdf.sap.corp:8081/nexus/content/groups/build.releases"
+      override="yes"/>
   <property name="releases.cloudera.com"
-      value="https://repository.cloudera.com/content/repositories/releases/"
-      override="false"/>
+      value="http://nexus.wdf.sap.corp:8081/nexus/content/groups/build.releases"
+      override="yes"/>
   <property name="www.datanucleus.org"
-      value="http://www.datanucleus.org/downloads/maven2/"
-      override="false"/>
+      value="http://nexus.wdf.sap.corp:8081/nexus/content/groups/build.releases"
+      override="yes"/>
   <property name="maven2.pattern"
       value="[organisation]/[module]/[revision]/[artifact]-[revision](-[classifier])"/>
   <property name="repo.dir" value="${user.home}/.m2/repository"/>
@@ -65,7 +65,7 @@ under the License.
     <ibiblio name="cloudera-staging" root="${staging.cloudera.com}"
         m2compatible="true" checkmodified="true" changingPattern=".*SNAPSHOT"/>
      <!--Conjars had to be added due to hive's dependency on calcite, which depends on pentaho-aggdesigner-algorithm;5.1.5-jhyde, which is only available in conjars and spring plugins repo -->
-     <ibiblio name="conjars" m2compatible="true" root="http://conjars.org/repo/"/>
+     <ibiblio name="conjars" m2compatible="true" root="http://nexus.wdf.sap.corp:8081/nexus/content/groups/build.releases/"/>
     <filesystem name="fs" m2compatible="true">
        <artifact pattern="${repo.dir}/[organisation]/[module]/[revision]/[module]-[revision](-[classifier]).[ext]"/>
        <ivy pattern="${repo.dir}/[organisation]/[module]/[revision]/[module]-[revision].pom"/>

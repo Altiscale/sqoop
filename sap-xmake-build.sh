@@ -11,7 +11,7 @@ export M2_HOME=/opt/mvn3
 export JAVA_HOME=/opt/sapjvm_7
 export PATH=$M2_HOME/bin:$JAVA_HOME/bin:/opt/apache-ant/bin:$PATH
 
-pip install elementpath
+pip install -i http://nexus.wdf.sap.corp:8081/nexus/content/groups/build.releases.pypi/simple/ --trusted-host nexus.wdf.sap.corp elementpath
 
 #------------------------------------------------------------------------------
 #
