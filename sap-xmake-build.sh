@@ -11,8 +11,6 @@ export M2_HOME=/opt/mvn3
 export JAVA_HOME=/opt/sapjvm_7
 export PATH=$M2_HOME/bin:$JAVA_HOME/bin:/opt/apache-ant/bin:$PATH
 
-curl -s 'https://issues.apache.org/jira/si/jira.issueviews:issue-xml/SQOOP-3149/SQOOP-3149.xml?field=key&field=type&field=parent'
-
 pip install -i http://nexus.wdf.sap.corp:8081/nexus/content/groups/build.releases.pypi/simple/ --trusted-host nexus.wdf.sap.corp elementpath
 
 #------------------------------------------------------------------------------

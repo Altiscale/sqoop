@@ -964,7 +964,7 @@
     </if>
   </target>
 
-  <target name="relnotes" depends="relnotes-uptodate" unless="relnotes.exists"
+  <!-- <target name="relnotes" depends="relnotes-uptodate" unless="relnotes.exists"
       description="Generate release notes">
     <exec executable="${python}" failonerror="yes">
       <arg value="${script.src.dir}/relnotes.py" />
@@ -974,7 +974,7 @@
       <arg value="${version}" />
       <arg value="${oldversion}" />
     </exec>
-  </target>
+  </target> -->
 
   <target name="release" depends="checkversion,tar,releaseaudit"
       description="Roll a release artifact">
@@ -1070,7 +1070,7 @@
 
   </target>
 
-  <target name="docs" depends="real-docs,relnotes,javadoc"
+  <target name="docs" depends="real-docs,javadoc"
       description="Build documentation"/>
 
   <target name="real-docs" depends="docs-uptodate,init" unless="skip-real-docs">
