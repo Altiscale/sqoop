@@ -82,10 +82,9 @@ def sanitize_log(in_log):
 
 def get_jira_doc(issue):
   """ Get the XML document from JIRA for a specified issue. """
-  print "issue: " + issue
+
   xml = os.popen("curl -s 'https://issues.apache.org/jira/si/jira.issueviews:" \
       + "issue-xml/%s/%s.xml?field=key&field=type&field=parent'" % (issue, issue)).read()
-  print "xml: " + xml
   return ElementTree.fromstring(xml)
 
 
@@ -235,8 +234,6 @@ def main(argv):
   oldversion = argv[5]
 
   log = get_log(git_src, commit_range)
-  print "log:"
-  print log
   log = sanitize_log(log)
   jira_info = get_jira_issue_types(log)   
   html = format_html(newversion, oldversion, log, jira_info)
