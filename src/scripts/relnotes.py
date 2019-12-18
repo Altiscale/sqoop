@@ -82,7 +82,7 @@ def sanitize_log(in_log):
 
 def get_jira_doc(issue):
   """ Get the XML document from JIRA for a specified issue. """
-
+  print "issue: " + issue
   xml = os.popen("curl -s 'https://issues.apache.org/jira/si/jira.issueviews:" \
       + "issue-xml/%s/%s.xml?field=key&field=type&field=parent'" % (issue, issue)).read()
   print "xml: " + xml
