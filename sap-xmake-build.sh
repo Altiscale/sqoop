@@ -19,7 +19,7 @@ pip install -i http://nexus.wdf.sap.corp:8081/nexus/content/groups/build.release
 #
 #------------------------------------------------------------------------------
 
-SQOOP_VERSION="${SQOOP_VERSION:-${XMAKE_PROJECT_VERSION}}"
+SQOOP_VERSION="1.4.7"
 export ARTIFACT_VERSION="$SQOOP_VERSION"
 
 ant -Dhadoopversion=200 -Dskip-real-docs=true -Dbin.artifact.name=sqoop-${ARTIFACT_VERSION} clean tar
@@ -70,7 +70,7 @@ fpm --verbose \
 --rpm-user root \
 --rpm-group root \
 -C ${INSTALL_DIR} \
-opt etc
+opt
 
 mv "${RPM_DIR}${RPM_NAME}-${ALTISCALE_RELEASE}-${DATE_STRING}.x86_64.rpm" "${RPM_DIR}alti-sqoop-${XMAKE_PROJECT_VERSION}.rpm"
 
